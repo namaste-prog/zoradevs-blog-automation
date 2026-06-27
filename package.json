@@ -1,0 +1,11 @@
+{
+  "name": "zoradevs-blog-automation",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "publish": "node scripts/generate-and-publish.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9"
+  }
+}
