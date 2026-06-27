@@ -1,0 +1,38 @@
+name: Publish Daily Blog
+
+on:
+  schedule:
+    # Mon–Fri 9:00 AM IST (3:30 AM UTC)
+    - cron: "30 3 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate and publish blog
+        run: node scripts/generate-and-publish.js
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BLOG_API_SECRET: ${{ secrets.BLOG_API_SECRET }}
+          BLOG_API_URL: ${{ secrets.BLOG_API_URL }}
+
+      - name: Commit log and LinkedIn queue
+        run: |
+          git config user.name "Blog Bot"
+          git config user.email "bot@zoradevs.com"
+          git add published_log.json linkedin_queue.txt
+          git diff --staged --quiet || git commit -m "Auto: published blog + linkedin post [skip ci]"
+          git push
