@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Zoradevs blog automation — reads today's keyword, calls Google Gemini, publishes to zoradevs.com.
- * Requires: GEMINI_API_KEY, BLOG_API_SECRET, BLOG_API_URL (GitHub Secrets).
+ * Zoradevs blog automation — reads today's keyword, calls Groq (Llama), publishes to zoradevs.com.
+ * Requires: GROQ_API_KEY, BLOG_API_SECRET, BLOG_API_URL (GitHub Secrets).
  */
 
 import fs from "fs";
@@ -14,8 +14,8 @@ const ROOT = path.join(__dirname, "..");
 
 const BLOG_API_URL = process.env.BLOG_API_URL ?? "https://zoradevs.com/api/blogs";
 const BLOG_API_SECRET = process.env.BLOG_API_SECRET;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama3-70b-8192";
 
 /** Mon=1 … Fri=5 (matches keywords.json) */
 function getWeekdaySlot() {
@@ -73,7 +73,7 @@ function buildSeoBrief(entry) {
 function buildBlogPrompt(brief) {
   return `You are an expert SEO content writer for Zoradevs, a software development company in India.
 
-Write a complete blog post as JSON only (no markdown fences, no extra text).
+Write a complete blog post as JSON only (no markdown fences, no extra text before or after the JSON).
 
 Primary keyword: ${brief.primaryKeyword}
 Secondary keywords: ${brief.secondaryKeywords.join(", ")}
@@ -103,35 +103,37 @@ Return exactly this JSON shape:
 }`;
 }
 
-async function callGemini(brief) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
-  const res = await axios.post(
-    url,
-    {
-      contents: [{ parts: [{ text: buildBlogPrompt(brief) }] }],
-      generationConfig: {
-        maxOutputTokens: 8192,
-        responseMimeType: "application/json",
-        temperature: 0.7,
-      },
-    },
-    {
-      headers: { "Content-Type": "application/json" },
-      timeout: 120000,
-    }
-  );
-
-  const text = res.data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-  if (!text) throw new Error("Gemini returned empty response");
-
+function parseBlogJson(text) {
+  if (!text) throw new Error("Groq returned empty response");
   try {
     return JSON.parse(text);
   } catch {
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("Gemini did not return valid JSON");
+    if (!jsonMatch) throw new Error("Groq did not return valid JSON");
     return JSON.parse(jsonMatch[0]);
   }
+}
+
+async function callGroq(brief) {
+  const res = await axios.post(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      model: GROQ_MODEL,
+      messages: [{ role: "user", content: buildBlogPrompt(brief) }],
+      max_tokens: 8192,
+      temperature: 0.7,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 120000,
+    }
+  );
+
+  const text = res.data.choices?.[0]?.message?.content ?? "";
+  return parseBlogJson(text);
 }
 
 function buildLinkedInPost(blog, category) {
@@ -211,22 +213,22 @@ async function main() {
     process.exit(0);
   }
 
-  if (!GEMINI_API_KEY) {
+  if (!GROQ_API_KEY) {
     console.error(
-      "Missing GEMINI_API_KEY. Add it in GitHub Secrets (from Google AI Studio)."
+      "Missing GROQ_API_KEY. Add it in GitHub Secrets (from console.groq.com)."
     );
     process.exit(1);
   }
 
   const brief = buildSeoBrief(entry);
-  console.log("Generating blog with Gemini for:", entry.keywords[0]);
+  console.log(`Generating blog with Groq (${GROQ_MODEL}) for:`, entry.keywords[0]);
 
   let blogPayload;
   try {
-    blogPayload = await callGemini(brief);
+    blogPayload = await callGroq(brief);
     if (!blogPayload.slug) blogPayload.slug = slugify(blogPayload.title);
   } catch (err) {
-    console.error("Gemini failed:", err.response?.data ?? err.message);
+    console.error("Groq failed:", err.response?.data ?? err.message);
     log.published.push({
       date,
       keyword: entry.keywords[0],
