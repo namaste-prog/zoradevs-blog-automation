@@ -16,7 +16,7 @@ Publishes one SEO blog per weekday to [zoradevs.com](https://zoradevs.com) via G
 | `BLOG_API_SECRET` | Same token as Vercel `BLOG_API_SECRET` |
 | `BLOG_API_URL` | `https://zoradevs.com/api/blogs` |
 
-Default model: `llama3-70b-8192` (set in workflow)
+Default model: `llama-3.3-70b-versatile` (set in workflow)
 
 ## Manual test
 
