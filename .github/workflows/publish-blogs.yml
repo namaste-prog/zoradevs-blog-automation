@@ -25,7 +25,7 @@ jobs:
       - name: Generate and publish blog
         run: node scripts/generate-and-publish.js
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           BLOG_API_SECRET: ${{ secrets.BLOG_API_SECRET }}
           BLOG_API_URL: ${{ secrets.BLOG_API_URL }}
 

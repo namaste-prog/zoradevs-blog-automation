@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Zoradevs blog automation — reads today's keyword, calls Claude, publishes to zoradevs.com.
- * Requires: ANTHROPIC_API_KEY, BLOG_API_SECRET, BLOG_API_URL (GitHub Secrets).
+ * Zoradevs blog automation — reads today's keyword, calls Google Gemini, publishes to zoradevs.com.
+ * Requires: GEMINI_API_KEY, BLOG_API_SECRET, BLOG_API_URL (GitHub Secrets).
  */
 
 import fs from "fs";
@@ -14,8 +14,8 @@ const ROOT = path.join(__dirname, "..");
 
 const BLOG_API_URL = process.env.BLOG_API_URL ?? "https://zoradevs.com/api/blogs";
 const BLOG_API_SECRET = process.env.BLOG_API_SECRET;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? "claude-3-5-haiku-latest";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
 
 /** Mon=1 … Fri=5 (matches keywords.json) */
 function getWeekdaySlot() {
@@ -67,18 +67,11 @@ function buildSeoBrief(entry) {
     secondaryKeywords: secondary,
     topic: entry.topic || "",
     category: entry.category,
-    suggestedH1: entry.topic || `Guide to ${primary} in 2026`,
-    h2s: secondary.map((k) => `Why ${k} matters for growing businesses`),
-    faqTopics: [
-      `What is ${primary}?`,
-      `How much does ${primary} cost in India?`,
-      `How to choose a partner for ${primary}?`,
-    ],
   };
 }
 
-async function callClaude(brief) {
-  const prompt = `You are an expert SEO content writer for Zoradevs, a software development company in India.
+function buildBlogPrompt(brief) {
+  return `You are an expert SEO content writer for Zoradevs, a software development company in India.
 
 Write a complete blog post as JSON only (no markdown fences, no extra text).
 
@@ -108,28 +101,37 @@ Return exactly this JSON shape:
   "keywords": ["...", "...", "...", "...", "..."],
   "tags": ["...", "...", "...", "...", "..."]
 }`;
+}
+
+async function callGemini(brief) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
   const res = await axios.post(
-    "https://api.anthropic.com/v1/messages",
+    url,
     {
-      model: CLAUDE_MODEL,
-      max_tokens: 8192,
-      messages: [{ role: "user", content: prompt }],
+      contents: [{ parts: [{ text: buildBlogPrompt(brief) }] }],
+      generationConfig: {
+        maxOutputTokens: 8192,
+        responseMimeType: "application/json",
+        temperature: 0.7,
+      },
     },
     {
-      headers: {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       timeout: 120000,
     }
   );
 
-  const text = res.data.content?.[0]?.text ?? "";
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error("Claude did not return valid JSON");
-  return JSON.parse(jsonMatch[0]);
+  const text = res.data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  if (!text) throw new Error("Gemini returned empty response");
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("Gemini did not return valid JSON");
+    return JSON.parse(jsonMatch[0]);
+  }
 }
 
 function buildLinkedInPost(blog, category) {
@@ -187,7 +189,7 @@ async function main() {
   }
 
   const daySlot = getWeekdaySlot();
-  if (!daySlot) {
+  if (daySlot === null) {
     console.log("Weekend — no blog scheduled.");
     process.exit(0);
   }
@@ -209,22 +211,22 @@ async function main() {
     process.exit(0);
   }
 
-  if (!ANTHROPIC_API_KEY) {
+  if (!GEMINI_API_KEY) {
     console.error(
-      "Missing ANTHROPIC_API_KEY. Add it in GitHub Secrets when you have a Claude account."
+      "Missing GEMINI_API_KEY. Add it in GitHub Secrets (from Google AI Studio)."
     );
     process.exit(1);
   }
 
   const brief = buildSeoBrief(entry);
-  console.log("Generating blog for:", entry.keywords[0]);
+  console.log("Generating blog with Gemini for:", entry.keywords[0]);
 
   let blogPayload;
   try {
-    blogPayload = await callClaude(brief);
+    blogPayload = await callGemini(brief);
     if (!blogPayload.slug) blogPayload.slug = slugify(blogPayload.title);
   } catch (err) {
-    console.error("Claude failed:", err.response?.data ?? err.message);
+    console.error("Gemini failed:", err.response?.data ?? err.message);
     log.published.push({
       date,
       keyword: entry.keywords[0],
