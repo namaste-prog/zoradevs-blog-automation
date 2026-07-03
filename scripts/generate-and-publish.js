@@ -1,23 +1,42 @@
 #!/usr/bin/env node
 /**
- * Zoradevs blog automation — reads today's keyword, calls Groq (Llama), publishes to zoradevs.com.
- * Requires: GROQ_API_KEY, BLOG_API_SECRET, BLOG_API_URL (GitHub Secrets).
+ * Zoradevs B2B Blog Automation — 5-layer Groq pipeline.
+ * Layer 1: Competitor discovery + website scrape
+ * Layer 2: India Google Trends + Groq trend filter
+ * Layer 3: 6-month anti-duplication memory
+ * Layer 4: Groq B2B content + FAQ schema
+ * Layer 5: Auto-publish + log
  */
 
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import axios from "axios";
+import { discoverCompetitors } from "./lib/competitors.js";
+import { scrapeZoradevsAndCompetitors } from "./lib/scraper.js";
+import { fetchIndiaTrends } from "./lib/india-trends.js";
+import { filterTrendsWithGroq, writeB2BBlog } from "./lib/pipeline.js";
+import { pickUniqueCandidate, slugify } from "./lib/dedup.js";
+import { buildFaqSchema } from "./lib/faq-schema.js";
+import { GROQ_MODEL } from "./lib/groq.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
 
 const BLOG_API_URL = process.env.BLOG_API_URL ?? "https://zoradevs.com/api/blogs";
 const BLOG_API_SECRET = process.env.BLOG_API_SECRET;
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+const BLOG_KEYWORDS_URL =
+  process.env.BLOG_KEYWORDS_URL ??
+  BLOG_API_URL.replace(/\/api\/blogs\/?$/, "/api/automation/keywords");
+const BLOG_AUTOMATION_URL =
+  process.env.BLOG_AUTOMATION_URL ??
+  BLOG_API_URL.replace(/\/api\/blogs\/?$/, "/api/automation/config");
 
-/** Mon=1 … Fri=5 (matches keywords.json) */
+const authHeaders = {
+  Authorization: `Bearer ${BLOG_API_SECRET}`,
+  "Content-Type": "application/json",
+};
+
 function getWeekdaySlot() {
   const d = new Date().getDay();
   if (d >= 1 && d <= 5) return d;
@@ -26,17 +45,6 @@ function getWeekdaySlot() {
 
 function todayISO() {
   return new Date().toISOString().slice(0, 10);
-}
-
-function slugify(text) {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .trim()
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .slice(0, 80)
-    .replace(/-$/, "");
 }
 
 function readJson(file) {
@@ -55,85 +63,96 @@ function appendLinkedInPost(text) {
 
 function calcReadTime(content) {
   const words = content.split(/\s+/).filter(Boolean).length;
-  const mins = Math.max(1, Math.round(words / 200));
-  return `${mins} min read`;
+  return `${Math.max(1, Math.round(words / 200))} min read`;
 }
 
-function buildSeoBrief(entry) {
-  const primary = entry.keywords[0];
-  const secondary = entry.keywords.slice(1);
-  return {
-    primaryKeyword: primary,
-    secondaryKeywords: secondary,
-    topic: entry.topic || "",
-    category: entry.category,
-  };
+async function fetchAutomationConfig() {
+  const res = await axios.get(BLOG_AUTOMATION_URL, {
+    headers: { Authorization: `Bearer ${BLOG_API_SECRET}` },
+    timeout: 30000,
+  });
+  return res.data;
 }
 
-function buildBlogPrompt(brief) {
-  return `You are an expert SEO content writer for Zoradevs, a software development company in India.
-
-Write a complete blog post as JSON only (no markdown fences, no extra text before or after the JSON).
-
-Primary keyword: ${brief.primaryKeyword}
-Secondary keywords: ${brief.secondaryKeywords.join(", ")}
-Category: ${brief.category}
-${brief.topic ? `Suggested angle: ${brief.topic}` : "Pick the best SEO title from keyword intent."}
-
-Requirements:
-- 1000-1500 words in the "content" field as markdown (use ## for H2, ### for H3, bullet lists)
-- Include an FAQs section at the end with 4-5 questions
-- meta_title: 50-60 chars, include Zoradevs
-- meta_description: 150-160 chars
-- excerpt: max 300 chars for blog cards
-- slug: lowercase, hyphens only, URL-safe
-- tags: 5 relevant tags
-- keywords: array of 5 SEO keywords
-
-Return exactly this JSON shape:
-{
-  "title": "...",
-  "slug": "...",
-  "excerpt": "...",
-  "content": "...",
-  "meta_title": "...",
-  "meta_description": "...",
-  "keywords": ["...", "...", "...", "...", "..."],
-  "tags": ["...", "...", "...", "...", "..."]
-}`;
-}
-
-function parseBlogJson(text) {
-  if (!text) throw new Error("Groq returned empty response");
+async function logPublishToApi(payload) {
   try {
-    return JSON.parse(text);
-  } catch {
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("Groq did not return valid JSON");
-    return JSON.parse(jsonMatch[0]);
+    const base = BLOG_AUTOMATION_URL.replace(/\/config\/?$/, "");
+    await axios.post(`${base}/publish-log`, payload, {
+      headers: authHeaders,
+      timeout: 30000,
+    });
+  } catch (err) {
+    console.warn("Could not save publish log:", err.response?.data ?? err.message);
   }
 }
 
-async function callGroq(brief) {
-  const res = await axios.post(
-    "https://api.groq.com/openai/v1/chat/completions",
-    {
-      model: GROQ_MODEL,
-      messages: [{ role: "user", content: buildBlogPrompt(brief) }],
-      max_tokens: 8192,
-      temperature: 0.7,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 120000,
-    }
+async function fetchKeywordEntry(daySlot) {
+  try {
+    const res = await axios.get(`${BLOG_KEYWORDS_URL}?day=${daySlot}`, {
+      headers: { Authorization: `Bearer ${BLOG_API_SECRET}` },
+      timeout: 30000,
+    });
+    const data = res.data;
+    if (!data?.keywords?.length) throw new Error("No keywords");
+    return {
+      topic: data.topic ?? "",
+      keywords: data.keywords,
+      category: data.category,
+      service: "Software Development",
+      topic_key: slugify(data.keywords[0]),
+      title_angle: data.topic || data.keywords[0],
+      india_angle: "Indian startups and SMEs",
+      source: "manual-keywords",
+    };
+  } catch {
+    const keywords = readJson("keywords.json");
+    const entry = keywords.find((k) => k.day === daySlot);
+    if (!entry) throw new Error(`No fallback keywords for day ${daySlot}`);
+    return {
+      ...entry,
+      service: entry.category,
+      topic_key: slugify(entry.keywords[0]),
+      title_angle: entry.topic || entry.keywords[0],
+      india_angle: "Indian startups and SMEs",
+      source: "fallback",
+    };
+  }
+}
+
+async function runB2BPipeline(config) {
+  const domain = config.domain ?? "https://zoradevs.com";
+
+  console.log("Layer 1: Discovering competitors...");
+  const competitors = await discoverCompetitors(config);
+  console.log(`Found ${competitors.length} competitors:`, competitors.map((c) => c.domain).join(", "));
+
+  console.log("Layer 1: Scraping Zoradevs + competitor sites...");
+  const scraped = await scrapeZoradevsAndCompetitors(
+    domain,
+    competitors.map((c) => c.domain)
   );
 
-  const text = res.data.choices?.[0]?.message?.content ?? "";
-  return parseBlogJson(text);
+  console.log("Layer 2: Fetching India Google Trends...");
+  const indiaTrends = await fetchIndiaTrends(20);
+  console.log(`India trends: ${indiaTrends.length} items`);
+
+  console.log("Layer 2: Groq trend filter...");
+  const candidates = await filterTrendsWithGroq({
+    services: config.services ?? [],
+    industryVerticals: config.industryVerticals ?? [],
+    indiaTrends,
+    scrapedText: scraped.combinedText,
+    recentTopics: config.recentTopics ?? [],
+  });
+
+  console.log("Layer 3: Anti-duplication check...");
+  const selected = pickUniqueCandidate(candidates, config.recentTopics ?? []);
+  if (!selected) {
+    throw new Error("All trend candidates were duplicates (6-month memory)");
+  }
+
+  console.log("Selected topic:", selected.topic);
+  return { ...selected, source: "b2b-pipeline" };
 }
 
 function buildLinkedInPost(blog, category) {
@@ -149,38 +168,19 @@ DATE: ${date}
 
 New on the Zoradevs blog — ${blog.excerpt}
 
-We break down ${category.toLowerCase()} insights for Indian startups and growing businesses.
+B2B tech insights for Indian startups and growing businesses.
 
 Link in comments 👇
 
-#SoftwareDevelopment #IndianStartups #TechStrategy #Zoradevs #${category.replace(/\s+/g, "")}
+#B2B #IndianStartups #SoftwareDevelopment #Zoradevs #${category.replace(/\s+/g, "")}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 }
 
-async function publishBlog(payload, category) {
-  const body = {
-    title: payload.title,
-    slug: payload.slug,
-    excerpt: payload.excerpt,
-    content: payload.content,
-    category,
-    tags: payload.tags ?? payload.keywords,
-    meta_title: payload.meta_title,
-    meta_description: payload.meta_description,
-    keywords: payload.keywords,
-    author: "Zoradevs",
-    read_time: calcReadTime(payload.content),
-    published: true,
-  };
-
-  const res = await axios.post(BLOG_API_URL, body, {
-    headers: {
-      Authorization: `Bearer ${BLOG_API_SECRET}`,
-      "Content-Type": "application/json",
-    },
+async function publishBlog(payload) {
+  const res = await axios.post(BLOG_API_URL, payload, {
+    headers: authHeaders,
     timeout: 60000,
   });
-
   return res.data;
 }
 
@@ -190,81 +190,130 @@ async function main() {
     process.exit(1);
   }
 
+  if (!process.env.GROQ_API_KEY) {
+    console.error("Missing GROQ_API_KEY");
+    process.exit(1);
+  }
+
   const daySlot = getWeekdaySlot();
   if (daySlot === null) {
     console.log("Weekend — no blog scheduled.");
     process.exit(0);
   }
 
-  const keywords = readJson("keywords.json");
-  const entry = keywords.find((k) => k.day === daySlot);
-  if (!entry) {
-    console.error(`No keywords.json entry for day ${daySlot}`);
-    process.exit(1);
+  const date = todayISO();
+  let config = {
+    autoTrendEnabled: true,
+    recentTopics: [],
+    publishedToday: null,
+    domain: "https://zoradevs.com",
+    services: [],
+    industryVerticals: [],
+  };
+
+  try {
+    config = await fetchAutomationConfig();
+  } catch (err) {
+    console.warn("Config API unavailable, using defaults:", err.message);
   }
 
-  const log = readJson("published_log.json");
-  const date = todayISO();
-  const already = log.published.find(
-    (p) => p.date === date || p.keyword === entry.keywords[0]
-  );
-  if (already?.status === "success") {
-    console.log("Already published today:", already.title);
+  if (config.publishedToday?.title) {
+    console.log("Already published today:", config.publishedToday.title);
     process.exit(0);
   }
 
-  if (!GROQ_API_KEY) {
-    console.error(
-      "Missing GROQ_API_KEY. Add it in GitHub Secrets (from console.groq.com)."
-    );
-    process.exit(1);
+  const log = readJson("published_log.json");
+  if (log.published?.find((p) => p.date === date && p.status === "success")) {
+    console.log("Already published today (local log).");
+    process.exit(0);
   }
 
-  const brief = buildSeoBrief(entry);
-  console.log(`Generating blog with Groq (${GROQ_MODEL}) for:`, entry.keywords[0]);
-
-  let blogPayload;
+  let topicEntry;
   try {
-    blogPayload = await callGroq(brief);
-    if (!blogPayload.slug) blogPayload.slug = slugify(blogPayload.title);
+    if (config.autoTrendEnabled !== false) {
+      topicEntry = await runB2BPipeline(config);
+    } else {
+      console.log("B2B pipeline disabled — using manual fallback keywords");
+      topicEntry = await fetchKeywordEntry(daySlot);
+    }
   } catch (err) {
-    console.error("Groq failed:", err.response?.data ?? err.message);
-    log.published.push({
-      date,
-      keyword: entry.keywords[0],
-      title: entry.topic || entry.keywords[0],
-      status: "failed",
-      error: String(err.message),
-    });
-    writeJson("published_log.json", log);
+    console.warn("B2B pipeline failed, hybrid fallback:", err.message);
+    topicEntry = await fetchKeywordEntry(daySlot);
+  }
+
+  const brief = {
+    service: topicEntry.service ?? topicEntry.category,
+    topic: topicEntry.topic || topicEntry.title_angle,
+    primaryKeyword: topicEntry.keywords[0],
+    secondaryKeywords: topicEntry.keywords.slice(1),
+    category: topicEntry.category,
+    titleAngle: topicEntry.title_angle ?? topicEntry.topic,
+    indiaAngle: topicEntry.india_angle ?? "Indian B2B market",
+  };
+
+  const source = topicEntry.source ?? "b2b-pipeline";
+  console.log(`Layer 4: Writing blog with Groq (${GROQ_MODEL}) [${source}]...`);
+
+  let blog;
+  try {
+    blog = await writeB2BBlog(brief);
+    if (!blog.slug) blog.slug = slugify(blog.title);
+  } catch (err) {
+    console.error("Groq writer failed:", err.message);
     process.exit(1);
   }
 
+  const faqSchema = buildFaqSchema(blog.faqs);
+  const publishPayload = {
+    title: blog.title,
+    slug: blog.slug,
+    excerpt: blog.excerpt,
+    content: blog.content,
+    category: topicEntry.category,
+    tags: blog.tags ?? blog.keywords,
+    meta_title: blog.meta_title,
+    meta_description: blog.meta_description,
+    keywords: blog.keywords,
+    faqs: blog.faqs,
+    faqSchema,
+    author: "Zoradevs",
+    read_time: calcReadTime(blog.content),
+    published: true,
+    service: topicEntry.service ?? "",
+  };
+
   try {
-    const result = await publishBlog(blogPayload, entry.category);
+    console.log("Layer 5: Publishing to", BLOG_API_URL);
+    const result = await publishBlog(publishPayload);
     console.log("Published:", result.url);
 
-    log.published.push({
+    const topicKey = topicEntry.topic_key ?? slugify(topicEntry.keywords[0]);
+    const successLog = {
       date,
-      keyword: entry.keywords[0],
-      title: blogPayload.title,
-      url: result.url,
+      topicKey,
+      title: blog.title,
+      keywords: blog.keywords ?? topicEntry.keywords,
+      category: topicEntry.category,
+      service: topicEntry.service ?? "",
+      source,
+      url: result.url?.startsWith("http") ? result.url : `https://zoradevs.com${result.url}`,
       status: "success",
-    });
-    writeJson("published_log.json", log);
+    };
 
-    appendLinkedInPost(buildLinkedInPost(blogPayload, entry.category));
-  } catch (err) {
-    const msg = err.response?.data ?? err.message;
-    console.error("Publish failed:", msg);
     log.published.push({
       date,
-      keyword: entry.keywords[0],
-      title: blogPayload.title,
-      status: "failed",
-      error: JSON.stringify(msg),
+      keyword: topicEntry.keywords[0],
+      title: blog.title,
+      url: successLog.url,
+      status: "success",
+      source,
     });
     writeJson("published_log.json", log);
+    await logPublishToApi(successLog);
+
+    appendLinkedInPost(buildLinkedInPost(blog, topicEntry.category));
+  } catch (err) {
+    console.error("Publish failed:", err.response?.data ?? err.message);
     process.exit(1);
   }
 }

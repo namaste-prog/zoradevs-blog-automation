@@ -22,13 +22,15 @@ jobs:
 
       - run: npm ci
 
-      - name: Generate and publish blog
+      - name: Generate and publish B2B blog
         run: node scripts/generate-and-publish.js
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: llama-3.3-70b-versatile
           BLOG_API_SECRET: ${{ secrets.BLOG_API_SECRET }}
           BLOG_API_URL: ${{ secrets.BLOG_API_URL }}
+          GOOGLE_CSE_API_KEY: ${{ secrets.GOOGLE_CSE_API_KEY }}
+          GOOGLE_CSE_CX: ${{ secrets.GOOGLE_CSE_CX }}
 
       - name: Commit log and LinkedIn queue
         run: |
