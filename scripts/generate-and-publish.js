@@ -260,6 +260,11 @@ async function main() {
     if (!blog.slug) blog.slug = slugify(blog.title);
   } catch (err) {
     console.error("Groq writer failed:", err.message);
+    if (err.status === 429) {
+      console.error(
+        "Tip: Groq free tier limits requests/minute. Re-run workflow in 2-3 minutes, or upgrade Groq plan."
+      );
+    }
     process.exit(1);
   }
 

@@ -1,11 +1,18 @@
 /**
- * Dynamic competitor discovery — Google Custom Search + Clutch fallback.
+ * Dynamic competitor discovery — Google CSE + static India fallback.
+ * Clutch often returns 403 from GitHub Actions IPs (expected).
  */
 import axios from "axios";
-import * as cheerio from "cheerio";
 
 const GOOGLE_CSE_KEY = process.env.GOOGLE_CSE_API_KEY;
 const GOOGLE_CSE_CX = process.env.GOOGLE_CSE_CX;
+
+/** Used when CSE + Clutch both fail — still gives competitor scrape targets. */
+const FALLBACK_INDIAN_COMPETITORS = [
+  { name: "Appinventiv", domain: "https://appinventiv.com", source: "fallback-india" },
+  { name: "ValueCoders", domain: "https://www.valuecoders.com", source: "fallback-india" },
+  { name: "Radixweb", domain: "https://radixweb.com", source: "fallback-india" },
+];
 
 function extractDomain(url) {
   try {
@@ -37,48 +44,16 @@ async function googleCustomSearch(query, num = 5) {
   }
 }
 
-async function clutchSearch() {
-  const url = "https://clutch.co/in/developers";
-  try {
-    const { data: html } = await axios.get(url, {
-      timeout: 20000,
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; Zoradevs-B2B-Bot/1.0)" },
-    });
-    const $ = cheerio.load(html);
-    const links = [];
-    $("a[href*='/profile/']").each((_, el) => {
-      const href = $(el).attr("href");
-      const title = $(el).text().trim();
-      if (href && title && links.length < 8) {
-        links.push({
-          title,
-          url: href.startsWith("http") ? href : `https://clutch.co${href}`,
-          source: "Clutch India",
-        });
-      }
-    });
-    return links;
-  } catch (err) {
-    console.warn("Clutch scrape failed:", err.message);
-    return [];
-  }
-}
-
 export async function discoverCompetitors(config) {
   const queries = config.competitorSearchQueries ?? [
-    "top software development companies India site:clutch.co",
-    "custom software development company India B2B",
+    "custom software development company India",
+    "mobile app development agency India B2B",
     "AI development company India startups",
   ];
 
   const results = [];
-  for (const query of queries.slice(0, 3)) {
-    const items = await googleCustomSearch(query, 5);
-    results.push(...items);
-  }
-
-  if (results.length < 3) {
-    results.push(...(await clutchSearch()));
+  for (const query of queries.slice(0, 2)) {
+    results.push(...(await googleCustomSearch(query, 5)));
   }
 
   const domains = new Set();
@@ -88,6 +63,7 @@ export async function discoverCompetitors(config) {
     const domain = extractDomain(item.url);
     if (!domain) continue;
     if (domain.includes("zoradevs.com")) continue;
+    if (domain.includes("clutch.co")) continue;
     if (domains.has(domain)) continue;
     domains.add(domain);
     competitors.push({
@@ -95,7 +71,14 @@ export async function discoverCompetitors(config) {
       domain: `https://${domain}`,
       source: item.source,
     });
-    if (competitors.length >= 5) break;
+    if (competitors.length >= 3) break;
+  }
+
+  if (competitors.length === 0) {
+    console.log(
+      "No competitors from Google CSE — using fallback Indian dev company domains (Clutch 403 is normal on CI)."
+    );
+    return FALLBACK_INDIAN_COMPETITORS;
   }
 
   return competitors;
