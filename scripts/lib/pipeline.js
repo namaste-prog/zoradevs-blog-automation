@@ -1,7 +1,7 @@
 /**
  * Layer 2 & 4 — Groq trend filter + B2B content engine.
  */
-import { callGroq, parseJson } from "./groq.js";
+import { callGroq, parseJson, sleep } from "./groq.js";
 
 const BLOCKED = ["politics", "crypto hype", "celebrity gossip", "adult content", "US-only consumer tech"];
 
@@ -25,7 +25,7 @@ export function buildTrendFilterPrompt({
       ? recentTopics.map((t) => `- ${t.title} [${t.topicKey}]`).join("\n")
       : "None";
 
-  const scrapedSample = scrapedText.slice(0, 6000);
+  const scrapedSample = scrapedText.slice(0, 2500);
 
   return `You are a B2B SEO strategist for Zoradevs (Indian software development company).
 
@@ -47,14 +47,7 @@ ${recentList}
 
 BLOCKED: ${BLOCKED.join(", ")}
 
-Task: Return 5 unique B2B blog topic candidates for Indian market. Focus on high-demand tech stacks and architectures like:
-- React + Python integration for startups
-- RAG framework for e-commerce in India
-- Custom CRM for logistics companies
-- Agentic AI for customer support
-- MERN stack for SaaS MVPs
-
-Each candidate must map to ONE Zoradevs service and be lead-gen focused.
+Task: Return 5 unique B2B blog topic candidates for Indian market.
 
 Return JSON only:
 {
@@ -75,7 +68,7 @@ Return JSON only:
 export function buildBlogWriterPrompt(brief) {
   return `You are an expert B2B content writer for Zoradevs, a software development company in Noida, India.
 
-Write a fresh, original long-form blog for Indian B2B buyers (startups, CTOs, founders).
+Write a fresh, original blog for Indian B2B buyers (startups, CTOs, founders).
 
 SERVICE FOCUS: ${brief.service}
 TOPIC: ${brief.topic}
@@ -86,17 +79,17 @@ TITLE ANGLE: ${brief.titleAngle}
 INDIA ANGLE: ${brief.indiaAngle}
 
 Requirements:
-- 1200-1800 words in "content" as markdown (## H2, ### H3, bullets)
-- Strong B2B tone — practical, authoritative, India-market specific
-- Include 3-4 natural CTAs inviting readers to contact Zoradevs for ${brief.service}
-- Do NOT include an FAQ section in content (FAQs go in separate "faqs" array)
+- 900-1200 words in "content" as markdown (## H2, ### H3, bullets)
+- Strong B2B tone — practical, India-market specific
+- Include 2-3 natural CTAs to contact Zoradevs for ${brief.service}
+- Do NOT include FAQ section in content (use "faqs" array only)
 - meta_title: 50-60 chars, include Zoradevs
 - meta_description: 150-160 chars
 - excerpt: max 300 chars
 - slug: lowercase hyphens only
 - tags: 5 tags
 - keywords: 5 SEO keywords
-- faqs: 5 items in People Also Ask style (question + detailed answer mentioning Zoradevs services where relevant)
+- faqs: exactly 5 People Also Ask style Q&As
 
 Return JSON only:
 {
@@ -115,7 +108,10 @@ Return JSON only:
 }
 
 export async function filterTrendsWithGroq(ctx) {
-  const text = await callGroq(buildTrendFilterPrompt(ctx), 0.4);
+  const text = await callGroq(buildTrendFilterPrompt(ctx), 0.4, {
+    maxTokens: 2048,
+    maxRetries: 4,
+  });
   const result = parseJson(text);
   if (!result.candidates?.length) {
     throw new Error("Groq trend filter returned no candidates");
@@ -124,7 +120,14 @@ export async function filterTrendsWithGroq(ctx) {
 }
 
 export async function writeB2BBlog(brief) {
-  const text = await callGroq(buildBlogWriterPrompt(brief), 0.65);
+  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 50);
+  console.log(`Waiting ${delaySec}s before Groq writer (avoids 429 rate limit)...`);
+  await sleep(delaySec * 1000);
+
+  const text = await callGroq(buildBlogWriterPrompt(brief), 0.65, {
+    maxTokens: 4096,
+    maxRetries: 6,
+  });
   const blog = parseJson(text);
   if (!blog.title || !blog.content || !blog.faqs?.length) {
     throw new Error("Groq writer returned incomplete blog");
