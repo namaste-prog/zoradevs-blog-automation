@@ -49,6 +49,8 @@ BLOCKED: ${BLOCKED.join(", ")}
 
 Task: Return 5 unique B2B blog topic candidates for Indian market.
 
+Return JSON only. CRITICAL: escape all newlines inside string values as \\n (no raw line breaks inside JSON strings).
+
 Return JSON only:
 {
   "candidates": [
@@ -91,6 +93,8 @@ Requirements:
 - keywords: 5 SEO keywords
 - faqs: exactly 5 People Also Ask style Q&As
 
+Return JSON only. CRITICAL: escape all newlines inside string values as \\n (no raw line breaks inside JSON strings).
+
 Return JSON only:
 {
   "title": "...",
@@ -124,13 +128,29 @@ export async function writeB2BBlog(brief) {
   console.log(`Waiting ${delaySec}s before Groq writer (avoids 429 rate limit)...`);
   await sleep(delaySec * 1000);
 
-  const text = await callGroq(buildBlogWriterPrompt(brief), 0.65, {
-    maxTokens: 4096,
-    maxRetries: 6,
-  });
-  const blog = parseJson(text);
-  if (!blog.title || !blog.content || !blog.faqs?.length) {
-    throw new Error("Groq writer returned incomplete blog");
+  let lastError;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const prompt =
+        attempt === 1
+          ? buildBlogWriterPrompt(brief)
+          : `${buildBlogWriterPrompt(brief)}\n\nIMPORTANT: Your previous response had invalid JSON. Return STRICT valid JSON. Use \\n for line breaks inside "content" and "answer" fields — never real newline characters inside quotes.`;
+
+      const text = await callGroq(prompt, 0.55, {
+        maxTokens: 4096,
+        maxRetries: 6,
+      });
+      const blog = parseJson(text);
+      if (!blog.title || !blog.content || !blog.faqs?.length) {
+        throw new Error("Groq writer returned incomplete blog");
+      }
+      return blog;
+    } catch (err) {
+      lastError = err;
+      console.warn(`Groq writer attempt ${attempt} failed:`, err.message);
+      if (attempt < 2) await sleep(10000);
+    }
   }
-  return blog;
+
+  throw lastError ?? new Error("Groq writer failed");
 }

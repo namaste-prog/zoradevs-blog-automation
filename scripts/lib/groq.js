@@ -1,7 +1,8 @@
 /**
- * Groq API helpers — retries on 429 rate limits.
+ * Groq API helpers — retries on 429 + robust JSON parsing.
  */
 import axios from "axios";
+import { jsonrepair } from "jsonrepair";
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 export const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
@@ -10,16 +11,31 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function extractJsonBlob(text) {
+  const cleaned = text.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  return match ? match[0] : cleaned;
+}
+
 export function parseJson(text) {
   if (!text) throw new Error("Groq returned empty response");
-  const cleaned = text.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("Groq did not return valid JSON");
-    return JSON.parse(jsonMatch[0]);
+
+  const blob = extractJsonBlob(text);
+  const attempts = [
+    () => JSON.parse(blob),
+    () => JSON.parse(jsonrepair(blob)),
+  ];
+
+  let lastError;
+  for (const attempt of attempts) {
+    try {
+      return attempt();
+    } catch (err) {
+      lastError = err;
+    }
   }
+
+  throw new Error(`Groq did not return valid JSON: ${lastError?.message ?? "parse failed"}`);
 }
 
 function groqErrorMessage(err) {
