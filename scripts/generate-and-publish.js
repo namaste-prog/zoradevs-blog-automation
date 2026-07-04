@@ -18,6 +18,7 @@ import { fetchIndiaTrends } from "./lib/india-trends.js";
 import { filterTrendsWithGroq, writeB2BBlog } from "./lib/pipeline.js";
 import { pickUniqueCandidate, slugify } from "./lib/dedup.js";
 import { buildFaqSchema } from "./lib/faq-schema.js";
+import { fetchBlogCoverImage } from "./lib/unsplash.js";
 import { GROQ_MODEL } from "./lib/groq.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -269,11 +270,22 @@ async function main() {
   }
 
   const faqSchema = buildFaqSchema(blog.faqs);
+
+  console.log("Fetching cover image from Unsplash...");
+  const cover = await fetchBlogCoverImage({
+    keyword: topicEntry.keywords[0],
+    category: topicEntry.category,
+    service: topicEntry.service,
+    title: blog.title,
+  });
+
   const publishPayload = {
     title: blog.title,
     slug: blog.slug,
     excerpt: blog.excerpt,
     content: blog.content,
+    image: cover.url,
+    image_credit: cover.imageCredit ?? undefined,
     category: topicEntry.category,
     tags: blog.tags ?? blog.keywords,
     meta_title: blog.meta_title,
