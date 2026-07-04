@@ -17,6 +17,7 @@ Zero-touch B2B lead-generation pipeline for Indian startups. Runs Mon–Fri via 
 | `GROQ_API_KEY` | Yes |
 | `BLOG_API_SECRET` | Yes |
 | `BLOG_API_URL` | Yes (`https://zoradevs.com/api/blogs`) |
+| `UNSPLASH_ACCESS_KEY` | Yes (cover images) |
 | `GOOGLE_CSE_API_KEY` | Optional (better competitor discovery) |
 | `GOOGLE_CSE_CX` | Optional |
 
