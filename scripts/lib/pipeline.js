@@ -4,6 +4,12 @@
 import { callGroq, parseJson, sleep } from "./groq.js";
 
 const BLOCKED = ["politics", "crypto hype", "celebrity gossip", "adult content", "US-only consumer tech"];
+const MIN_WORDS = 1500;
+const MAX_WORDS = 1800;
+
+function countWords(text) {
+  return String(text || "").split(/\s+/).filter(Boolean).length;
+}
 
 export function buildTrendFilterPrompt({
   services,
@@ -81,7 +87,9 @@ TITLE ANGLE: ${brief.titleAngle}
 INDIA ANGLE: ${brief.indiaAngle}
 
 Requirements:
-- 900-1200 words in "content" as markdown (## H2, ### H3, bullets)
+- 1500-1800 words in "content" (strict minimum 1500 words)
+- Use markdown headings: ## for main sections (H2), ### for subsections (H3) — never show raw # symbols as plain text
+- Use bullet lists with "- " prefix where helpful
 - Strong B2B tone — practical, India-market specific
 - Include 2-3 natural CTAs to contact Zoradevs for ${brief.service}
 - Do NOT include FAQ section in content (use "faqs" array only)
@@ -134,15 +142,23 @@ export async function writeB2BBlog(brief) {
       const prompt =
         attempt === 1
           ? buildBlogWriterPrompt(brief)
-          : `${buildBlogWriterPrompt(brief)}\n\nIMPORTANT: Your previous response had invalid JSON. Return STRICT valid JSON. Use \\n for line breaks inside "content" and "answer" fields — never real newline characters inside quotes.`;
+          : `${buildBlogWriterPrompt(brief)}\n\nIMPORTANT: Previous response was invalid or too short. Return STRICT valid JSON with at least ${MIN_WORDS} words in "content". Use \\n for line breaks inside strings. Use ## and ### for headings only (not raw # in paragraph text).`;
 
       const text = await callGroq(prompt, 0.55, {
-        maxTokens: 4096,
+        maxTokens: 8192,
         maxRetries: 6,
       });
       const blog = parseJson(text);
       if (!blog.title || !blog.content || !blog.faqs?.length) {
         throw new Error("Groq writer returned incomplete blog");
+      }
+      const words = countWords(blog.content);
+      console.log(`Blog word count: ${words}`);
+      if (words < MIN_WORDS && attempt < 2) {
+        throw new Error(`Blog too short (${words} words, need ${MIN_WORDS}+)`);
+      }
+      if (words > MAX_WORDS + 200) {
+        console.warn(`Blog is ${words} words (target ${MIN_WORDS}-${MAX_WORDS})`);
       }
       return blog;
     } catch (err) {
