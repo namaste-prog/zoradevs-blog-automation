@@ -15,7 +15,7 @@ Zero-touch B2B lead-generation pipeline for **Delhi NCR first** (Noida, Gurgaon,
 - **Region:** Delhi NCR (Noida / Gurgaon / Delhi) first; Pan-India only as fallback
 - **AI keywords:** every blog keyword set must include AI
 - **Authors:** randomly assigned from Mansi, Parul, Nikhil
-- **Length:** minimum 2000 words (target 2000–2600)
+- **Length:** minimum 2000 words via 3-part Groq write (fits free-tier TPM limits)
 - **Images:** Unsplash search uses blog keywords; previously used photo IDs are never reused (`used_unsplash_ids.json`)
 - **No repeats:** topic key + keyword combo + similar titles are blocked
 
