@@ -36,9 +36,10 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: llama-3.3-70b-versatile
+          GROQ_FALLBACK_MODEL: llama-3.1-8b-instant
           GROQ_CALL_DELAY_SEC: "15"
           GROQ_PART_DELAY_SEC: "25"
-          GROQ_MAX_429_WAIT_SEC: "90"
+          GROQ_MAX_429_WAIT_SEC: "60"
           GROQ_META_MAX_TOKENS: "2200"
           GROQ_PART_MAX_TOKENS: "3200"
           GROQ_MAX_TOKENS: "4500"
