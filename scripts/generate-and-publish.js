@@ -245,8 +245,8 @@ async function runB2BPipeline(config) {
  * Metadata pass with strict AI-in-title validation (up to 3 regenerations).
  */
 async function writeBlogWithTitleValidation(brief) {
-  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 40);
-  console.log(`Waiting ${delaySec}s before Groq writer (avoids 429 rate limit)...`);
+  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 15);
+  console.log(`Waiting ${delaySec}s before Groq writer (TPM cooldown after topic pick)...`);
   await sleep(delaySec * 1000);
 
   let meta = null;
@@ -263,7 +263,10 @@ async function writeBlogWithTitleValidation(brief) {
       `Title missing "AI" (attempt ${attempt}): "${meta.title}" — forcing metadata regeneration...`
     );
     meta = null;
-    if (attempt < TITLE_META_RETRIES) await sleep(10000);
+    if (attempt < TITLE_META_RETRIES) {
+      const coolSec = Number(process.env.GROQ_PART_DELAY_SEC ?? 25);
+      await sleep(coolSec * 1000);
+    }
   }
 
   if (!meta || !titleContainsAi(meta.title)) {
