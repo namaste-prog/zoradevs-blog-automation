@@ -39,6 +39,7 @@ jobs:
           BLOG_API_SECRET: ${{ secrets.BLOG_API_SECRET }}
           BLOG_API_URL: ${{ secrets.BLOG_API_URL }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           GOOGLE_CSE_API_KEY: ${{ secrets.GOOGLE_CSE_API_KEY }}
           GOOGLE_CSE_CX: ${{ secrets.GOOGLE_CSE_CX }}
           FORCE_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_publish || 'false' }}

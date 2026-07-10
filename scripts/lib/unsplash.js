@@ -1,17 +1,19 @@
 /**
- * Unsplash cover image for automated blogs.
- * Requires UNSPLASH_ACCESS_KEY (GitHub Secret).
+ * Cover image for automated blogs — Unsplash + Pexels.
  *
  * Rules:
- * - Search using blog keywords (not random category fluff)
+ * - Search ONLY with Groq `imageQuery` (literal physical scene), never the full title
+ * - Landscape orientation only (API param + reject portrait)
  * - Never reuse a photo ID already used in published blogs
+ * - Try Unsplash first, then Pexels as co-provider / fallback
  */
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import axios from "axios";
 
-const ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
+const UNSPLASH_KEY = process.env.UNSPLASH_ACCESS_KEY;
+const PEXELS_KEY = process.env.PEXELS_API_KEY;
 const UTM = "utm_source=zoradevs&utm_medium=referral";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -40,7 +42,27 @@ function categoryFallback(category) {
     imageCredit: null,
     source: "category-fallback",
     unsplashId: null,
+    imageId: null,
   };
+}
+
+function isLandscape(width, height) {
+  const w = Number(width) || 0;
+  const h = Number(height) || 0;
+  if (!w || !h) return false;
+  return w >= h;
+}
+
+function normalizeImageQuery(imageQuery) {
+  return String(imageQuery || "")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 5)
+    .join(" ");
 }
 
 export function loadUsedUnsplashIds(extraIds = []) {
@@ -70,38 +92,16 @@ export function saveUsedUnsplashId(unsplashId) {
   );
 }
 
-/**
- * Build keyword-first search queries (most relevant first).
- */
-function buildSearchQueries({ keywords = [], keyword, category, title }) {
-  const kw = keywords.map((k) => String(k || "").trim()).filter(Boolean);
-  const primary = kw[0] || keyword || "";
-  const secondary = kw.slice(1, 4);
-  const queries = [];
-
-  if (primary) queries.push(primary);
-  for (const k of secondary) queries.push(k);
-  if (primary && secondary[0]) queries.push(`${primary} ${secondary[0]}`);
-  if (title) {
-    const shortTitle = String(title)
-      .replace(/[|:–—-].*$/, "")
-      .trim()
-      .split(/\s+/)
-      .slice(0, 8)
-      .join(" ");
-    if (shortTitle) queries.push(shortTitle);
-  }
-  if (primary) queries.push(`${primary} artificial intelligence technology`);
-  if (category) queries.push(`${category} AI technology business`);
-
-  return [...new Set(queries.map((q) => q.trim()).filter(Boolean))];
+/** Persist any provider image id (unsplash:… or pexels:…). */
+export function saveUsedImageId(imageId) {
+  saveUsedUnsplashId(imageId);
 }
 
-async function triggerDownload(downloadLocation) {
-  if (!downloadLocation || !ACCESS_KEY) return;
+async function triggerUnsplashDownload(downloadLocation) {
+  if (!downloadLocation || !UNSPLASH_KEY) return;
   try {
     await axios.get(downloadLocation, {
-      headers: { Authorization: `Client-ID ${ACCESS_KEY}` },
+      headers: { Authorization: `Client-ID ${UNSPLASH_KEY}` },
       timeout: 10000,
     });
   } catch {
@@ -109,11 +109,12 @@ async function triggerDownload(downloadLocation) {
   }
 }
 
-function toCoverResult(pick) {
+function toUnsplashResult(pick) {
   const photographer = pick.user?.name ?? "Unsplash Contributor";
   const photographerUrl = pick.user?.links?.html
     ? `${pick.user.links.html}?${UTM}`
     : `https://unsplash.com/?${UTM}`;
+  const id = `unsplash:${pick.id}`;
 
   return {
     url: pick.urls?.regular ?? pick.urls?.full,
@@ -123,14 +124,40 @@ function toCoverResult(pick) {
       unsplashUrl: `https://unsplash.com/photos/${pick.id}?${UTM}`,
     },
     source: "unsplash",
-    unsplashId: pick.id,
+    unsplashId: id,
+    imageId: id,
+  };
+}
+
+function toPexelsResult(pick) {
+  const photographer = pick.photographer ?? "Pexels Contributor";
+  const photographerUrl = pick.photographer_url || "https://www.pexels.com/";
+  const id = `pexels:${pick.id}`;
+  const url =
+    pick.src?.large2x ||
+    pick.src?.large ||
+    pick.src?.landscape ||
+    pick.src?.original;
+
+  return {
+    url,
+    imageCredit: {
+      photographer,
+      photographerUrl,
+      unsplashUrl: pick.url || `https://www.pexels.com/photo/${pick.id}/`,
+    },
+    source: "pexels",
+    unsplashId: id,
+    imageId: id,
   };
 }
 
 /**
- * Search Unsplash and return the first unused photo (no random pick).
+ * Search Unsplash with landscape-only filter. Rejects portrait results.
  */
 async function searchUnsplash(query, usedIds) {
+  if (!UNSPLASH_KEY) return null;
+
   const { data } = await axios.get("https://api.unsplash.com/search/photos", {
     params: {
       query,
@@ -139,25 +166,65 @@ async function searchUnsplash(query, usedIds) {
       content_filter: "high",
       order_by: "relevant",
     },
-    headers: { Authorization: `Client-ID ${ACCESS_KEY}` },
+    headers: { Authorization: `Client-ID ${UNSPLASH_KEY}` },
     timeout: 20000,
   });
 
   const results = data.results ?? [];
   for (const pick of results) {
     if (!pick?.id || !pick?.urls) continue;
-    if (usedIds.has(pick.id)) {
+    if (!isLandscape(pick.width, pick.height)) {
+      console.log(`Skipping portrait Unsplash photo: ${pick.id}`);
+      continue;
+    }
+    const keyed = `unsplash:${pick.id}`;
+    if (usedIds.has(keyed) || usedIds.has(pick.id)) {
       console.log(`Skipping already-used Unsplash photo: ${pick.id}`);
       continue;
     }
-    await triggerDownload(pick.links?.download_location);
-    return toCoverResult(pick);
+    await triggerUnsplashDownload(pick.links?.download_location);
+    return toUnsplashResult(pick);
+  }
+  return null;
+}
+
+/**
+ * Search Pexels with landscape-only filter. Rejects portrait results.
+ */
+async function searchPexels(query, usedIds) {
+  if (!PEXELS_KEY) return null;
+
+  const { data } = await axios.get("https://api.pexels.com/v1/search", {
+    params: {
+      query,
+      per_page: 30,
+      orientation: "landscape",
+      size: "large",
+    },
+    headers: { Authorization: PEXELS_KEY },
+    timeout: 20000,
+  });
+
+  const results = data.photos ?? [];
+  for (const pick of results) {
+    if (!pick?.id || !pick?.src) continue;
+    if (!isLandscape(pick.width, pick.height)) {
+      console.log(`Skipping portrait Pexels photo: ${pick.id}`);
+      continue;
+    }
+    const keyed = `pexels:${pick.id}`;
+    if (usedIds.has(keyed) || usedIds.has(String(pick.id))) {
+      console.log(`Skipping already-used Pexels photo: ${pick.id}`);
+      continue;
+    }
+    return toPexelsResult(pick);
   }
   return null;
 }
 
 /**
  * @param {{
+ *   imageQuery?: string,
  *   keywords?: string[],
  *   keyword?: string,
  *   category: string,
@@ -167,43 +234,60 @@ async function searchUnsplash(query, usedIds) {
  * }} opts
  */
 export async function fetchBlogCoverImage({
+  imageQuery,
   keywords = [],
   keyword,
   category,
-  service,
-  title,
   excludeIds = [],
 }) {
-  if (!ACCESS_KEY) {
-    console.warn("UNSPLASH_ACCESS_KEY not set — using category fallback image");
+  const query =
+    normalizeImageQuery(imageQuery) ||
+    normalizeImageQuery(keywords[0] || keyword) ||
+    "software developers working laptops office";
+
+  if (!UNSPLASH_KEY && !PEXELS_KEY) {
+    console.warn("No UNSPLASH_ACCESS_KEY or PEXELS_API_KEY — using category fallback image");
     return categoryFallback(category);
   }
 
   const usedIds = loadUsedUnsplashIds(excludeIds);
-  const queries = buildSearchQueries({
-    keywords: keywords.length ? keywords : [keyword, service].filter(Boolean),
-    keyword,
-    category,
-    title,
-  });
+  console.log(`Cover imageQuery (literal scene only): "${query}"`);
+  console.log(`Excluding ${usedIds.size} previously used image IDs`);
 
-  console.log("Fetching Unsplash cover from keywords:", (keywords[0] || keyword || "").slice(0, 60));
-  console.log(`Excluding ${usedIds.size} previously used Unsplash IDs`);
-
-  for (const query of queries) {
+  // Unsplash first
+  if (UNSPLASH_KEY) {
     try {
-      const result = await searchUnsplash(query, usedIds);
-      if (result?.url) {
-        console.log("Unsplash image:", result.url.slice(0, 60) + "...");
-        console.log("Photo by:", result.imageCredit?.photographer, `(id: ${result.unsplashId})`);
-        return result;
+      const unsplash = await searchUnsplash(query, usedIds);
+      if (unsplash?.url) {
+        console.log("Unsplash image:", unsplash.url.slice(0, 60) + "...");
+        console.log("Photo by:", unsplash.imageCredit?.photographer, `(id: ${unsplash.imageId})`);
+        return unsplash;
       }
-      console.warn(`No unused Unsplash results for query: ${query}`);
+      console.warn(`No unused landscape Unsplash results for: ${query}`);
     } catch (err) {
       console.warn(`Unsplash search failed (${query}):`, err.response?.data ?? err.message);
     }
+  } else {
+    console.warn("UNSPLASH_ACCESS_KEY not set — trying Pexels");
   }
 
-  console.warn("Unsplash returned no unused results — using category fallback");
+  // Pexels co-provider / fallback
+  if (PEXELS_KEY) {
+    try {
+      const pexels = await searchPexels(query, usedIds);
+      if (pexels?.url) {
+        console.log("Pexels image:", pexels.url.slice(0, 60) + "...");
+        console.log("Photo by:", pexels.imageCredit?.photographer, `(id: ${pexels.imageId})`);
+        return pexels;
+      }
+      console.warn(`No unused landscape Pexels results for: ${query}`);
+    } catch (err) {
+      console.warn(`Pexels search failed (${query}):`, err.response?.data ?? err.message);
+    }
+  } else {
+    console.warn("PEXELS_API_KEY not set — no Pexels fallback");
+  }
+
+  console.warn("No unused landscape stock results — using category fallback");
   return categoryFallback(category);
 }
