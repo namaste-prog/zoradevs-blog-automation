@@ -372,6 +372,11 @@ async function main() {
       topicEntry = await fetchKeywordEntry(daySlot);
     }
   } catch (err) {
+    if (err.code === "GROQ_TPD" || /tokens per day|\(tpd\)/i.test(err.message)) {
+      console.error("Groq daily token limit hit during topic generation — aborting (fallback would also fail).");
+      console.error(err.message);
+      process.exit(1);
+    }
     console.warn("B2B pipeline failed, hybrid fallback:", err.message);
     topicEntry = await fetchKeywordEntry(daySlot);
   }
@@ -435,9 +440,15 @@ async function main() {
     }
   } catch (err) {
     console.error("Groq writer failed:", err.message);
-    if (err.status === 429) {
+    if (err.code === "GROQ_TPD" || /tokens per day|\(tpd\)/i.test(err.message)) {
       console.error(
-        "Tip: Groq free tier limits requests/minute. Re-run workflow in 2-3 minutes, or upgrade Groq plan."
+        "Tip: Free-tier daily tokens for llama-3.3-70b are exhausted. " +
+          "The bot will auto-try llama-3.1-8b-instant next run. " +
+          "Or wait for daily reset / upgrade Groq Dev Tier: https://console.groq.com/settings/billing"
+      );
+    } else if (err.status === 429) {
+      console.error(
+        "Tip: Groq rate limit — re-run in a few minutes, or raise GROQ_PART_DELAY_SEC."
       );
     }
     process.exit(1);
