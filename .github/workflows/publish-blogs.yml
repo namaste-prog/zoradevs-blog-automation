@@ -5,6 +5,15 @@ on:
     # Mon–Fri 9:00 AM IST (3:30 AM UTC)
     - cron: "30 3 * * 1-5"
   workflow_dispatch:
+    inputs:
+      force_publish:
+        description: "Force publish even if a blog was already logged today"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 permissions:
   contents: write
@@ -32,11 +41,16 @@ jobs:
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           GOOGLE_CSE_API_KEY: ${{ secrets.GOOGLE_CSE_API_KEY }}
           GOOGLE_CSE_CX: ${{ secrets.GOOGLE_CSE_CX }}
+          FORCE_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_publish || 'false' }}
 
       - name: Commit log and LinkedIn queue
         run: |
           git config user.name "Blog Bot"
           git config user.email "bot@zoradevs.com"
-          git add published_log.json linkedin_queue.txt used_unsplash_ids.json
-          git diff --staged --quiet || git commit -m "Auto: published blog + linkedin post [skip ci]"
-          git push
+          git add published_log.json linkedin_queue.txt used_unsplash_ids.json || true
+          if git diff --staged --quiet; then
+            echo "No log changes to commit"
+          else
+            git commit -m "Auto: published blog + linkedin post [skip ci]"
+            git push
+          fi

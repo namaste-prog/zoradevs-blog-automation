@@ -73,6 +73,41 @@ function pickRandomAuthor() {
   return BLOG_AUTHORS[Math.floor(Math.random() * BLOG_AUTHORS.length)];
 }
 
+function forcePublishEnabled() {
+  return String(process.env.FORCE_PUBLISH || "").toLowerCase() === "true";
+}
+
+/** If topic collides with history, rewrite into a unique Delhi NCR + AI angle. */
+function uniquifyTopicEntry(entry, allRecent) {
+  if (!isDuplicate(entry, allRecent)) return entry;
+
+  const year = new Date().getFullYear();
+  const stamp = todayISO().slice(5).replace("-", ""); // MMDD
+  const base = ensureAiInKeywords(entry.keywords || []);
+  const uniqueKeywords = ensureAiInKeywords([
+    `${base[0]} Delhi NCR ${year}`,
+    `AI software development Noida ${stamp}`,
+    ...base.slice(1, 4),
+  ]);
+  const topic =
+    entry.topic && !isDuplicate({ ...entry, topic: `${entry.topic} for Delhi NCR ${year}` }, allRecent)
+      ? `${entry.topic} for Delhi NCR businesses in ${year}`
+      : `AI-powered ${entry.category || "software"} solutions for Delhi NCR startups (${year})`;
+
+  const next = {
+    ...entry,
+    topic,
+    title_angle: topic,
+    keywords: uniqueKeywords,
+    topic_key: slugify(`${uniqueKeywords[0]}-${stamp}`),
+    india_angle: "Delhi NCR (Noida, Gurgaon, Delhi) first; Pan-India secondary",
+    region_focus: "delhi-ncr",
+  };
+
+  console.warn("Topic overlapped with history — using unique angle:", next.topic);
+  return next;
+}
+
 async function fetchAutomationConfig() {
   const res = await axios.get(BLOG_AUTOMATION_URL, {
     headers: { Authorization: `Bearer ${BLOG_API_SECRET}` },
@@ -243,14 +278,26 @@ async function main() {
   }
 
   if (config.publishedToday?.title) {
-    console.log("Already published today:", config.publishedToday.title);
-    process.exit(0);
+    if (forcePublishEnabled()) {
+      console.warn(
+        `FORCE_PUBLISH=true — ignoring already-published-today marker: ${config.publishedToday.title}`
+      );
+    } else {
+      console.log("Already published today:", config.publishedToday.title);
+      console.log("Tip: re-run workflow with force_publish=true to publish another blog today.");
+      process.exit(0);
+    }
   }
 
   const log = readJson("published_log.json");
   if (log.published?.find((p) => p.date === date && p.status === "success")) {
-    console.log("Already published today (local log).");
-    process.exit(0);
+    if (forcePublishEnabled()) {
+      console.warn("FORCE_PUBLISH=true — ignoring local published_log for today.");
+    } else {
+      console.log("Already published today (local log).");
+      console.log("Tip: re-run workflow with force_publish=true to publish another blog today.");
+      process.exit(0);
+    }
   }
 
   let topicEntry;
@@ -276,12 +323,23 @@ async function main() {
       keyword: p.keyword,
     }));
   const allRecent = [...(config.recentTopics ?? []), ...localRecent];
-  if (isDuplicate(topicEntry, allRecent)) {
-    console.error("Resolved topic is a duplicate of a previously published blog. Aborting.");
-    process.exit(1);
-  }
-
+  topicEntry = uniquifyTopicEntry(topicEntry, allRecent);
   topicEntry.keywords = ensureAiInKeywords(topicEntry.keywords);
+
+  if (isDuplicate(topicEntry, allRecent)) {
+    // Last resort unique key so we never hard-stop a weekday publish.
+    topicEntry.topic_key = slugify(`${topicEntry.keywords[0]}-${Date.now()}`);
+    topicEntry.keywords = ensureAiInKeywords([
+      `AI development company Noida ${todayISO()}`,
+      "AI automation Delhi NCR",
+      "custom software Gurgaon AI",
+      "hire AI developers Delhi",
+      "Pan India AI software services",
+    ]);
+    topicEntry.topic = `AI software development for Delhi NCR businesses — ${todayISO()}`;
+    topicEntry.title_angle = topicEntry.topic;
+    console.warn("Applied last-resort unique topic for today.");
+  }
 
   const brief = {
     service: topicEntry.service ?? topicEntry.category,
