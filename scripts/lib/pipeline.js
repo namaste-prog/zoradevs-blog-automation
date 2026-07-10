@@ -9,7 +9,6 @@ const MIN_WORDS = 2000;
 const MAX_WORDS = 2800;
 const PART_MAX_TOKENS = Number(process.env.GROQ_PART_MAX_TOKENS ?? 4500);
 const META_MAX_TOKENS = Number(process.env.GROQ_META_MAX_TOKENS ?? 3500);
-const TITLE_YEAR = 2026;
 
 /** Exact closing paragraph required on every published blog (SEO roadmap). */
 export const ZORADEVS_CLOSING_PARAGRAPH =
@@ -25,8 +24,8 @@ export function titleContainsAi(title) {
 
 function regionInstruction(regionFocus) {
   return regionFocus === "pan-india"
-    ? "Use Pan-India framing, but still mention Delhi NCR / Noida presence of Zoradevs where natural."
-    : "PRIMARY GEO FOCUS: Delhi NCR (Noida, Gurgaon/Gurugram, Delhi, Greater Noida). Mention local business context, hiring, and delivery advantages. Pan-India only as supporting context.";
+    ? "Body prose may use Pan-India framing and mention Zoradevs' Delhi NCR / Noida presence where natural. Never put location or year into the title or H2/H3 headings."
+    : "Body prose may reference Delhi NCR (Noida, Gurgaon/Gurugram, Delhi) business context where natural. Never put location or year into the title or H2/H3 headings — keep geo in keywords/metadata only.";
 }
 
 function briefBlock(brief) {
@@ -62,7 +61,7 @@ export function ensureZoradevsClosing(content) {
 
 /**
  * Build topic-selection prompt from core services (no Google Trends).
- * Titles must follow Pattern 1 or Pattern 2 with a 2026 anchor.
+ * Titles/topics must read naturally — geo + year belong in keywords only.
  */
 export function buildTrendFilterPrompt({
   services,
@@ -83,13 +82,10 @@ export function buildTrendFilterPrompt({
 
   const scrapedSample = String(scrapedText || "").slice(0, 2500);
 
-  return `You are a B2B SEO strategist for ZoraDevs (AI / software development company in Noida / Delhi NCR, India).
+  return `You are a B2B SEO strategist for ZoraDevs (AI / software development company serving Indian businesses).
 
-TARGET AUDIENCE (priority order):
-1. PRIMARY: Delhi NCR buyers — Noida, Gurgaon (Gurugram), Delhi, Greater Noida founders, CTOs, and SME operators
-2. SECONDARY: Pan-India businesses evaluating software / AI partners
-
-Buyers care about ROI, software scale, hiring developers, product velocity, and AI-powered growth — NOT spammy keyword stuffing.
+TARGET AUDIENCE:
+Founders, CTOs, and SME operators evaluating software / AI partners. They care about ROI, software scale, hiring developers, product velocity, and AI-powered growth — NOT spammy keyword stuffing.
 
 ZORADEVS CORE SERVICES (map EVERY candidate to one of these):
 ${serviceList || "- Software Development\n- AI Development\n- Mobile App Development\n- Website Development"}
@@ -104,18 +100,21 @@ ${recentList}
 
 BLOCKED: ${BLOCKED.join(", ")}
 
-STRICT TITLE FORMULA (2026 anchor — every candidate topic / title_angle MUST match ONE pattern):
-- Pattern 1: [Service/Industry] + AI + in [India/Noida/Delhi NCR] + ${TITLE_YEAR}
-  Example: "Fintech AI in Delhi NCR ${TITLE_YEAR}"
-- Pattern 2: AI + [Service/Industry] + in [India/Noida/Delhi NCR] + ${TITLE_YEAR}
-  Example: "AI Mobile App Development in Noida ${TITLE_YEAR}"
+TITLE / TOPIC RULES (critical):
+- topic and title_angle must look 100% natural, professional, and human-appealing
+- Good examples: "How AI is Transforming Modern E-Commerce Platforms", "Building Smarter Mobile Apps with AI", "Why AI Matters for Custom Software Teams"
+- MUST organically include "AI" or a clear AI concept (artificial intelligence, machine learning, generative AI, etc.)
+- MUST relate to one of our core services / industry verticals
+- DO NOT force location words into topic or title_angle (no Noida, Delhi NCR, Gurgaon, India-as-geo-tag, etc.)
+- DO NOT force a year into topic or title_angle (no 2026, 2025, etc.)
+- DO NOT use rigid SEO formulas like "[Service] + AI + in [City] + [Year]"
 
-HARD RULES:
-- Derive topics ONLY from the core services list (and industry verticals), never from news/trends feeds
-- Prefer Noida / Delhi NCR in the geo slot; use India when a broader angle is clearer
-- EVERY keywords array MUST include AI (e.g. "AI", "AI automation") AND business-intent phrases (founders, ROI, software scale, hire developers, product growth)
-- Keywords must sound natural and commercial — DO NOT look spammy or stuffed
+KEYWORDS / METADATA RULES (geo lives HERE only):
+- EVERY keywords array MUST include AI AND local/business-intent SEO terms
+- Put location keywords ONLY in the keywords array (e.g. "AI development company Noida", "software development Delhi NCR", "IT company Noida")
+- Also include business-intent phrases (founders, ROI, software scale, hire developers) — natural, not spammy
 - Never repeat or closely rephrase any topic from the 6-month list
+- Derive topics ONLY from the core services list (and industry verticals)
 
 Task: Return 5 unique B2B blog topic candidates mapped to core services.
 
@@ -125,13 +124,13 @@ Return JSON only:
 {
   "candidates": [
     {
-      "topic": "must match Pattern 1 or Pattern 2 with ${TITLE_YEAR}",
+      "topic": "natural human title angle with AI, NO location, NO year",
       "service": "exact service title from list",
       "category": "blog category",
-      "keywords": ["business-intent primary with AI + region", "kw2", "kw3", "kw4", "kw5"],
+      "keywords": ["AI + business intent", "local SEO term e.g. Noida", "kw3", "kw4", "kw5"],
       "topic_key": "url-slug-dedup-key",
-      "title_angle": "same Pattern 1 or Pattern 2 as topic",
-      "india_angle": "why Noida / Delhi NCR / India founders care (ROI, scale)",
+      "title_angle": "natural professional title direction (AI organic, no geo, no year)",
+      "india_angle": "why Indian / Delhi NCR founders care (for body context only — not for the title)",
       "region_focus": "delhi-ncr | pan-india"
     }
   ]
@@ -139,16 +138,23 @@ Return JSON only:
 }
 
 function buildMetaPrompt(brief) {
-  return `You are an expert B2B SEO writer for ZoraDevs (Noida / Delhi NCR).
+  return `You are an expert B2B SEO writer for ZoraDevs.
 
 ${briefBlock(brief)}
 
 STRICT TITLE RULES:
-- Title MUST contain the substring "AI" (case-insensitive)
-- Title MUST follow ONE of these patterns with ${TITLE_YEAR}:
-  Pattern 1: [Service/Industry] + AI + in [India/Noida/Delhi NCR] + ${TITLE_YEAR}
-  Pattern 2: AI + [Service/Industry] + in [India/Noida/Delhi NCR] + ${TITLE_YEAR}
+- Title must look 100% natural, professional, and appealing to humans
+- Good example: "How AI is Transforming Modern E-Commerce Platforms"
+- Title MUST organically include "AI" or a clear AI concept
+- Title MUST relate to our core service / topic
+- DO NOT put location in the title (no Noida, Delhi NCR, Gurgaon, India geo-tags)
+- DO NOT put a year in the title (no 2026, etc.)
+- DO NOT use formulaic SEO titles like "X AI in Noida 2026"
+
+KEYWORDS / TAGS (geo belongs HERE only):
 - Keywords must be business-intent (founders, ROI, software scale) — not spammy
+- Include local SEO terms in keywords/tags only (Noida, Delhi NCR, etc.) — NEVER in title
+- meta_title / meta_description may mention Zoradevs; keep them readable, not stuffed
 
 Also return imageQuery: a 4-5 word LITERAL physical scene for stock photography
 (e.g. "software developers working laptops office"). NEVER abstract concepts like "innovation" or "digital transformation".
@@ -156,12 +162,12 @@ Also return imageQuery: a 4-5 word LITERAL physical scene for stock photography
 Return ONLY metadata JSON (no full article body yet). CRITICAL: escape newlines in strings as \\n.
 
 {
-  "title": "must include AI and ${TITLE_YEAR} per Pattern 1 or 2",
+  "title": "natural professional title with AI, no location, no year",
   "slug": "lowercase-hyphens-only",
   "excerpt": "max 300 chars",
   "meta_title": "50-60 chars including Zoradevs",
   "meta_description": "150-160 chars",
-  "keywords": ["5 SEO keywords", "must include AI", "business intent", "...", "..."],
+  "keywords": ["AI keyword", "local SEO e.g. Noida", "business intent", "...", "..."],
   "tags": ["5 tags", "include AI", "...", "...", "..."],
   "imageQuery": "four or five word physical scene",
   "faqs": [
@@ -181,11 +187,12 @@ function buildPartPrompt(brief, title, part) {
       target: "700-900 words",
       sections: `Write ONLY these sections in markdown:
 ## Introduction
-## Why This Matters for Delhi NCR Businesses
+## Why This Matters for Growing Businesses
 ## The Core Problem Startups Face
-## Market Context in India and Delhi NCR
+## Market Context and Opportunity
 
-Include practical examples for Noida / Gurgaon / Delhi founders. Weave AI naturally. Focus on ROI and software scale.`,
+Use natural, professional H2/H3 headings — do NOT force "Noida", "Delhi NCR", or a year into headings.
+You may mention local Indian business context in the body prose where it fits naturally. Weave AI organically. Focus on ROI and software scale.`,
     },
     2: {
       label: "PART 2 of 3",
@@ -369,11 +376,12 @@ async function expandIfNeeded(brief, title, content) {
 
   const text = await callGroq(
     `Expand this Zoradevs B2B blog. Keep existing sections. Add deeper detail under existing H2/H3 headings and/or add:
-## Real-World Use Cases in Delhi NCR
+## Real-World Use Cases
 ## Budget and Timeline Considerations
 
 Target: add about ${needed} words. Return ONLY the full expanded markdown body (no JSON, no code fences).
 Do NOT change or remove the final ZoraDevs closing paragraph if present.
+Do NOT force location names or years into new headings — keep headings natural.
 
 TITLE: ${title}
 TOPIC: ${brief.topic}

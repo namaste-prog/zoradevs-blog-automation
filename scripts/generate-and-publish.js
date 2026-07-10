@@ -2,7 +2,7 @@
 /**
  * Zoradevs B2B Blog Automation — SEO Roadmap pipeline.
  * Layer 1: Competitor discovery + website scrape
- * Layer 2: Core-services topic generation (Pattern 1 / Pattern 2 + 2026)
+ * Layer 2: Core-services topic generation (natural AI titles; geo in keywords only)
  * Layer 3: 6-month anti-duplication memory
  * Layer 4: Groq B2B content + FAQ schema + AI title validation
  * Layer 5: Landscape cover (Unsplash/Pexels) + publish + log
@@ -106,22 +106,20 @@ function appendStaticLocalKeywords(keywords = []) {
   return merged;
 }
 
-/** If topic collides with history, rewrite into a unique Delhi NCR + AI angle. */
+/** If topic collides with history, rewrite into a unique natural AI angle (geo stays in keywords). */
 function uniquifyTopicEntry(entry, allRecent) {
   if (!isDuplicate(entry, allRecent)) return entry;
 
-  const year = 2026;
   const stamp = todayISO().slice(5).replace("-", ""); // MMDD
   const base = ensureAiInKeywords(entry.keywords || []);
+  const serviceLabel = entry.category || entry.service || "Software Development";
   const uniqueKeywords = ensureAiInKeywords([
-    `${base[0]} Delhi NCR ${year}`,
+    `${base[0]} Delhi NCR`,
     `AI software development Noida ${stamp}`,
-    ...base.slice(1, 4),
+    "IT company Noida",
+    ...base.slice(1, 3),
   ]);
-  const topic =
-    entry.topic && !isDuplicate({ ...entry, topic: `${entry.topic} for Delhi NCR ${year}` }, allRecent)
-      ? `AI ${entry.category || "Software Development"} in Delhi NCR ${year}`
-      : `AI software development in Noida ${year}`;
+  const topic = `How AI Is Reshaping ${serviceLabel} for Modern Businesses`;
 
   const next = {
     ...entry,
@@ -129,7 +127,7 @@ function uniquifyTopicEntry(entry, allRecent) {
     title_angle: topic,
     keywords: uniqueKeywords,
     topic_key: slugify(`${uniqueKeywords[0]}-${stamp}`),
-    india_angle: "Delhi NCR (Noida, Gurgaon, Delhi) first; Pan-India secondary",
+    india_angle: "Delhi NCR (Noida, Gurgaon, Delhi) first; Pan-India secondary — body/keywords only",
     region_focus: "delhi-ncr",
   };
 
@@ -394,7 +392,7 @@ async function main() {
       "hire AI developers Delhi",
       "Pan India AI software services",
     ]);
-    topicEntry.topic = `AI software development in Delhi NCR 2026`;
+    topicEntry.topic = "How AI Is Transforming Modern Software Development";
     topicEntry.title_angle = topicEntry.topic;
     console.warn("Applied last-resort unique topic for today.");
   }
