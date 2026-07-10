@@ -196,14 +196,18 @@ async function fetchKeywordEntry(daySlot) {
 async function runB2BPipeline(config) {
   const domain = config.domain ?? "https://zoradevs.com";
 
-  console.log("Layer 1: Discovering competitors...");
+  console.log("Layer 1: Discovering competitors (Google CSE, dynamic)...");
   const competitors = await discoverCompetitors(config);
-  console.log(`Found ${competitors.length} competitors:`, competitors.map((c) => c.domain).join(", "));
+  const topCompetitors = competitors.slice(0, 3);
+  console.log(
+    `Using top ${topCompetitors.length} competitor(s):`,
+    topCompetitors.map((c) => c.domain).join(", ") || "(none — services-only)"
+  );
 
-  console.log("Layer 1: Scraping Zoradevs + competitor sites...");
+  console.log("Layer 1: Lightweight homepage scrape (meta + H1/H2 only, no sub-pages)...");
   const scraped = await scrapeZoradevsAndCompetitors(
     domain,
-    competitors.map((c) => c.domain)
+    topCompetitors.map((c) => c.domain)
   );
 
   console.log("Layer 2: Generating topics from core services (no Google Trends)...");

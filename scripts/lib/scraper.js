@@ -1,47 +1,51 @@
 /**
- * Website scraper — sitemap + page structure (titles, H1/H2, meta).
+ * Lightweight homepage scraper — meta + H1/H2 (or first ~300 words).
+ * Competitors: homepage ONLY (no sitemap / sub-pages).
+ * Zoradevs: homepage ONLY (core services come from config, not deep scrape).
  */
 import axios from "axios";
 import * as cheerio from "cheerio";
 
-/** Zoradevs-only paths (competitors use homepage + sitemap only). */
-const ZORADEVS_PATHS = [
-  "/",
-  "/services/mobile-app-development",
-  "/services/website-development",
-  "/services/web-app-development",
-  "/services/ai-development",
-  "/services/software-development",
-  "/services/custom-software-development",
-  "/services/hire-software-developers",
-  "/services/consulting",
-  "/services/ui-ux-design",
-  "/blog",
-  "/about",
-  "/contact",
-];
+const MAX_COMPETITORS = 3;
+const MAX_VISIBLE_WORDS = 300;
+const MAX_H1 = 5;
+const MAX_H2 = 8;
 
-function normalizeUrl(base, path) {
+function normalizeUrl(base, path = "/") {
   const clean = path.startsWith("http")
     ? path
     : `${base.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
   return clean;
 }
 
-function sameHost(url, baseUrl) {
-  try {
-    const a = new URL(url).hostname.replace(/^www\./, "");
-    const b = new URL(baseUrl).hostname.replace(/^www\./, "");
-    return a === b;
-  } catch {
-    return false;
-  }
+function firstNWords(text, n = MAX_VISIBLE_WORDS) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, n)
+    .join(" ");
 }
 
-async function fetchPageIntel(url) {
+/**
+ * Strip scripts/styles/nav noise and take visible body text.
+ */
+function extractVisibleText($, limit = MAX_VISIBLE_WORDS) {
+  $("script, style, noscript, svg, iframe, nav, footer, header").remove();
+  const raw = $("main").text() || $("body").text() || "";
+  return firstNWords(raw, limit);
+}
+
+/**
+ * Homepage-only intel: meta title, meta description, H1/H2, optional short body.
+ * Never follows sitemaps or sub-pages.
+ */
+async function fetchHomepageIntel(baseUrl) {
+  const url = normalizeUrl(baseUrl, "/");
   try {
     const { data: html } = await axios.get(url, {
-      timeout: 20000,
+      timeout: 15000,
       headers: { "User-Agent": "Zoradevs-B2B-Bot/1.0 (+https://zoradevs.com)" },
       maxRedirects: 3,
       validateStatus: (s) => s >= 200 && s < 400,
@@ -49,72 +53,101 @@ async function fetchPageIntel(url) {
 
     const $ = cheerio.load(html);
     const title = $("title").first().text().trim();
-    const metaDescription = $('meta[name="description"]').attr("content")?.trim() ?? "";
-    const h1 = $("h1").map((_, el) => $(el).text().trim()).get().filter(Boolean).slice(0, 5);
-    const h2 = $("h2").map((_, el) => $(el).text().trim()).get().filter(Boolean).slice(0, 12);
+    const metaDescription =
+      $('meta[name="description"]').attr("content")?.trim() ||
+      $('meta[property="og:description"]').attr("content")?.trim() ||
+      "";
+    const h1 = $("h1")
+      .map((_, el) => $(el).text().trim())
+      .get()
+      .filter(Boolean)
+      .slice(0, MAX_H1);
+    const h2 = $("h2")
+      .map((_, el) => $(el).text().trim())
+      .get()
+      .filter(Boolean)
+      .slice(0, MAX_H2);
 
-    return { url, title, metaDescription, h1, h2 };
-  } catch {
+    const hasHeadings = h1.length > 0 || h2.length > 0;
+    const visibleText = hasHeadings ? "" : extractVisibleText($, MAX_VISIBLE_WORDS);
+
+    return {
+      url,
+      title,
+      metaDescription,
+      h1,
+      h2,
+      visibleText,
+    };
+  } catch (err) {
+    console.warn(`Homepage scrape failed (${url}):`, err.message);
     return null;
   }
 }
 
-async function fetchSitemapPaths(baseUrl) {
-  const sitemapUrl = normalizeUrl(baseUrl, "/sitemap.xml");
-  try {
-    const { data } = await axios.get(sitemapUrl, {
-      timeout: 15000,
-      headers: { "User-Agent": "Zoradevs-B2B-Bot/1.0" },
-    });
-    const $ = cheerio.load(data, { xmlMode: true });
-    return $("loc")
-      .map((_, el) => $(el).text().trim())
-      .get()
-      .filter((loc) => sameHost(loc, baseUrl))
-      .slice(0, 12);
-  } catch {
-    return [];
-  }
+/**
+ * Compress one homepage into a tiny prompt-ready block.
+ */
+function compressPageIntel(label, page) {
+  if (!page) return "";
+
+  const lines = [`[${label}] ${page.url}`];
+  if (page.title) lines.push(`title: ${page.title}`);
+  if (page.metaDescription) lines.push(`meta: ${firstNWords(page.metaDescription, 60)}`);
+  if (page.h1?.length) lines.push(`h1: ${page.h1.join(" | ")}`);
+  if (page.h2?.length) lines.push(`h2: ${page.h2.slice(0, MAX_H2).join(" | ")}`);
+  if (page.visibleText) lines.push(`text: ${page.visibleText}`);
+
+  return lines.join("\n");
 }
 
+/**
+ * Scrape a single site homepage only (no deep crawl).
+ */
 export async function scrapeWebsite(baseUrl) {
-  const isZoradevs = baseUrl.includes("zoradevs.com");
-  const sitemapUrls = await fetchSitemapPaths(baseUrl);
+  const page = await fetchHomepageIntel(baseUrl);
+  const host = (() => {
+    try {
+      return new URL(normalizeUrl(baseUrl)).hostname;
+    } catch {
+      return baseUrl;
+    }
+  })();
 
-  let urls;
-  if (isZoradevs) {
-    const fromPaths = ZORADEVS_PATHS.map((p) => normalizeUrl(baseUrl, p));
-    urls = [...new Set([...fromPaths, ...sitemapUrls])].slice(0, 15);
-  } else {
-    urls = [...new Set([normalizeUrl(baseUrl, "/"), ...sitemapUrls])].slice(0, 5);
+  if (!page) {
+    console.log(`Scraped 0/1 homepage from ${host}`);
+    return { domain: baseUrl, pages: [], textPool: "" };
   }
 
-  const pages = await Promise.all(urls.map((url) => fetchPageIntel(url)));
-  const valid = pages.filter(Boolean);
-
-  const textPool = valid
-    .flatMap((p) => [p.title, p.metaDescription, ...p.h1, ...p.h2])
-    .filter(Boolean)
-    .join("\n");
-
-  console.log(`Scraped ${valid.length}/${urls.length} pages from ${new URL(baseUrl).hostname}`);
-
+  console.log(`Scraped homepage only from ${host}`);
   return {
     domain: baseUrl,
-    pages: valid,
-    textPool,
+    pages: [page],
+    textPool: compressPageIntel(host, page),
   };
 }
 
+/**
+ * Zoradevs homepage + TOP N competitor homepages only.
+ * Deep-site / sitemap scraping is intentionally disabled.
+ */
 export async function scrapeZoradevsAndCompetitors(domain, competitorDomains = []) {
-  const own = await scrapeWebsite(domain);
-  const competitors = await Promise.all(
-    competitorDomains.slice(0, 3).map((d) => scrapeWebsite(d))
+  const topCompetitors = [...new Set(competitorDomains.filter(Boolean))].slice(0, MAX_COMPETITORS);
+
+  console.log(
+    `Lightweight scrape: Zoradevs homepage + top ${topCompetitors.length} competitor homepage(s) only`
   );
+
+  const own = await scrapeWebsite(domain);
+  const competitors = await Promise.all(topCompetitors.map((d) => scrapeWebsite(d)));
 
   const combinedText = [own.textPool, ...competitors.map((c) => c.textPool)]
     .filter(Boolean)
-    .join("\n\n");
+    .join("\n\n")
+    .trim();
+
+  const approxWords = combinedText.split(/\s+/).filter(Boolean).length;
+  console.log(`Compressed scrape context: ~${approxWords} words (homepage meta/headings only)`);
 
   return { own, competitors, combinedText };
 }

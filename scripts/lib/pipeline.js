@@ -80,20 +80,20 @@ export function buildTrendFilterPrompt({
       ? recentTopics.map((t) => `- ${t.title} [${t.topicKey}]`).join("\n")
       : "None";
 
-  const scrapedSample = String(scrapedText || "").slice(0, 2500);
+  const scrapedSample = String(scrapedText || "").slice(0, 1200);
 
   return `You are a B2B SEO strategist for ZoraDevs (AI / software development company serving Indian businesses).
 
 TARGET AUDIENCE:
 Founders, CTOs, and SME operators evaluating software / AI partners. They care about ROI, software scale, hiring developers, product velocity, and AI-powered growth — NOT spammy keyword stuffing.
 
-ZORADEVS CORE SERVICES (map EVERY candidate to one of these):
+ZORADEVS CORE SERVICES (map EVERY candidate to one of these — primary context):
 ${serviceList || "- Software Development\n- AI Development\n- Mobile App Development\n- Website Development"}
 
 INDUSTRY VERTICALS: ${industries}
 
-WEBSITE INTELLIGENCE (Zoradevs + competitors — titles, H1/H2, meta):
-${scrapedSample || "Use service list only."}
+LIGHTWEIGHT MARKET SIGNALS (homepage meta/H1/H2 only — compressed; do not invent deep-site claims):
+${scrapedSample || "No competitor homepage signals — rely on core services only."}
 
 TOPICS USED IN LAST 6 MONTHS (DO NOT REPEAT — no same topic, title, or keyword combo):
 ${recentList}
