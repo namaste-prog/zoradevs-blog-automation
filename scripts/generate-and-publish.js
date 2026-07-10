@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Zoradevs B2B Blog Automation — 5-layer Groq pipeline.
+ * Zoradevs B2B Blog Automation — SEO Roadmap pipeline.
  * Layer 1: Competitor discovery + website scrape
- * Layer 2: India Google Trends + Groq trend filter
+ * Layer 2: Core-services topic generation (Pattern 1 / Pattern 2 + 2026)
  * Layer 3: 6-month anti-duplication memory
- * Layer 4: Groq B2B content + FAQ schema
- * Layer 5: Auto-publish + log
+ * Layer 4: Groq B2B content + FAQ schema + AI title validation
+ * Layer 5: Landscape cover (Unsplash/Pexels) + publish + log
  */
 
 import fs from "fs";
@@ -14,12 +14,16 @@ import { fileURLToPath } from "url";
 import axios from "axios";
 import { discoverCompetitors } from "./lib/competitors.js";
 import { scrapeZoradevsAndCompetitors } from "./lib/scraper.js";
-import { fetchIndiaTrends } from "./lib/india-trends.js";
-import { filterTrendsWithGroq, writeB2BBlog } from "./lib/pipeline.js";
+import {
+  filterTrendsWithGroq,
+  writeBlogMetadata,
+  writeB2BBlogBody,
+  titleContainsAi,
+} from "./lib/pipeline.js";
 import { pickUniqueCandidate, slugify, ensureAiInKeywords, isDuplicate } from "./lib/dedup.js";
 import { buildFaqSchema } from "./lib/faq-schema.js";
 import { fetchBlogCoverImage, saveUsedUnsplashId, loadUsedUnsplashIds } from "./lib/unsplash.js";
-import { GROQ_MODEL } from "./lib/groq.js";
+import { GROQ_MODEL, sleep } from "./lib/groq.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -32,6 +36,16 @@ const BLOG_KEYWORDS_URL =
 const BLOG_AUTOMATION_URL =
   process.env.BLOG_AUTOMATION_URL ??
   BLOG_API_URL.replace(/\/api\/blogs\/?$/, "/api/automation/config");
+
+/** Static local SEO keywords appended to every publish payload. */
+const STATIC_LOCAL_KEYWORDS = [
+  "AI development company Noida",
+  "software development company Noida",
+  "IT company Noida",
+  "app development Delhi NCR",
+];
+
+const TITLE_META_RETRIES = 3;
 
 const authHeaders = {
   Authorization: `Bearer ${BLOG_API_SECRET}`,
@@ -77,11 +91,26 @@ function forcePublishEnabled() {
   return String(process.env.FORCE_PUBLISH || "").toLowerCase() === "true";
 }
 
+/** Deduped merge: existing keywords + required local SEO terms. */
+function appendStaticLocalKeywords(keywords = []) {
+  const merged = [];
+  const seen = new Set();
+  for (const kw of [...keywords, ...STATIC_LOCAL_KEYWORDS]) {
+    const cleaned = String(kw || "").trim();
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(cleaned);
+  }
+  return merged;
+}
+
 /** If topic collides with history, rewrite into a unique Delhi NCR + AI angle. */
 function uniquifyTopicEntry(entry, allRecent) {
   if (!isDuplicate(entry, allRecent)) return entry;
 
-  const year = new Date().getFullYear();
+  const year = 2026;
   const stamp = todayISO().slice(5).replace("-", ""); // MMDD
   const base = ensureAiInKeywords(entry.keywords || []);
   const uniqueKeywords = ensureAiInKeywords([
@@ -91,8 +120,8 @@ function uniquifyTopicEntry(entry, allRecent) {
   ]);
   const topic =
     entry.topic && !isDuplicate({ ...entry, topic: `${entry.topic} for Delhi NCR ${year}` }, allRecent)
-      ? `${entry.topic} for Delhi NCR businesses in ${year}`
-      : `AI-powered ${entry.category || "software"} solutions for Delhi NCR startups (${year})`;
+      ? `AI ${entry.category || "Software Development"} in Delhi NCR ${year}`
+      : `AI software development in Noida ${year}`;
 
   const next = {
     ...entry,
@@ -179,15 +208,10 @@ async function runB2BPipeline(config) {
     competitors.map((c) => c.domain)
   );
 
-  console.log("Layer 2: Fetching India Google Trends...");
-  const indiaTrends = await fetchIndiaTrends(20);
-  console.log(`India trends: ${indiaTrends.length} items`);
-
-  console.log("Layer 2: Groq trend filter...");
+  console.log("Layer 2: Generating topics from core services (no Google Trends)...");
   const candidates = await filterTrendsWithGroq({
     services: config.services ?? [],
     industryVerticals: config.industryVerticals ?? [],
-    indiaTrends,
     scrapedText: scraped.combinedText,
     recentTopics: config.recentTopics ?? [],
   });
@@ -202,7 +226,7 @@ async function runB2BPipeline(config) {
   console.log("Layer 3: Anti-duplication check...");
   const selected = pickUniqueCandidate(withAi, config.recentTopics ?? []);
   if (!selected) {
-    throw new Error("All trend candidates were duplicates (6-month memory)");
+    throw new Error("All service topic candidates were duplicates (6-month memory)");
   }
 
   console.log("Selected topic:", selected.topic);
@@ -213,6 +237,40 @@ async function runB2BPipeline(config) {
     region_focus: selected.region_focus || "delhi-ncr",
     source: "b2b-pipeline",
   };
+}
+
+/**
+ * Metadata pass with strict AI-in-title validation (up to 3 regenerations).
+ */
+async function writeBlogWithTitleValidation(brief) {
+  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 40);
+  console.log(`Waiting ${delaySec}s before Groq writer (avoids 429 rate limit)...`);
+  await sleep(delaySec * 1000);
+
+  let meta = null;
+  for (let attempt = 1; attempt <= TITLE_META_RETRIES; attempt++) {
+    console.log(`Writer pass: metadata + FAQs (attempt ${attempt}/${TITLE_META_RETRIES})...`);
+    meta = await writeBlogMetadata(brief);
+
+    if (titleContainsAi(meta.title)) {
+      console.log(`Title AI validation passed (attempt ${attempt}): ${meta.title}`);
+      break;
+    }
+
+    console.warn(
+      `Title missing "AI" (attempt ${attempt}): "${meta.title}" — forcing metadata regeneration...`
+    );
+    meta = null;
+    if (attempt < TITLE_META_RETRIES) await sleep(10000);
+  }
+
+  if (!meta || !titleContainsAi(meta.title)) {
+    throw new Error(
+      `Title must contain "AI" (case-insensitive) after ${TITLE_META_RETRIES} metadata retries`
+    );
+  }
+
+  return writeB2BBlogBody(brief, meta);
 }
 
 function buildLinkedInPost(blog, category) {
@@ -336,7 +394,7 @@ async function main() {
       "hire AI developers Delhi",
       "Pan India AI software services",
     ]);
-    topicEntry.topic = `AI software development for Delhi NCR businesses — ${todayISO()}`;
+    topicEntry.topic = `AI software development in Delhi NCR 2026`;
     topicEntry.title_angle = topicEntry.topic;
     console.warn("Applied last-resort unique topic for today.");
   }
@@ -359,11 +417,16 @@ async function main() {
 
   let blog;
   try {
-    blog = await writeB2BBlog(brief);
+    blog = await writeBlogWithTitleValidation(brief);
     if (!blog.slug) blog.slug = slugify(blog.title);
     blog.keywords = ensureAiInKeywords(blog.keywords ?? topicEntry.keywords);
     if (!blog.tags?.some((t) => /\bai\b|artificial intelligence/i.test(t))) {
       blog.tags = ensureAiInKeywords([...(blog.tags || []), "AI"]).slice(0, 5);
+    }
+
+    // Final safety: title must still contain AI after full write.
+    if (!titleContainsAi(blog.title)) {
+      throw new Error(`Final title missing "AI": ${blog.title}`);
     }
   } catch (err) {
     console.error("Groq writer failed:", err.message);
@@ -382,22 +445,31 @@ async function main() {
     .filter(Boolean);
   const excludeIds = [...loadUsedUnsplashIds(usedFromLog)];
 
-  console.log("Fetching cover image from Unsplash (keyword-based, no repeats)...");
+  console.log("Fetching landscape cover (imageQuery only — Unsplash then Pexels)...");
   const cover = await fetchBlogCoverImage({
+    imageQuery: blog.imageQuery,
     keywords: blog.keywords ?? topicEntry.keywords,
     keyword: topicEntry.keywords[0],
     category: topicEntry.category,
     service: topicEntry.service,
-    title: blog.title,
     excludeIds,
   });
 
-  if (cover.unsplashId) {
-    saveUsedUnsplashId(cover.unsplashId);
+  if (cover.unsplashId || cover.imageId) {
+    saveUsedUnsplashId(cover.unsplashId || cover.imageId);
   }
+
+  // Append required local SEO keywords right before publish.
+  const publishKeywords = appendStaticLocalKeywords(blog.keywords ?? topicEntry.keywords);
+  blog.keywords = publishKeywords;
+
+  // Auto alt text = first keyword in the (post-append) keywords array.
+  const imageAlt = publishKeywords[0] || "AI development company Noida";
 
   const author = pickRandomAuthor();
   console.log("Author:", author);
+  console.log("Image alt:", imageAlt);
+  console.log("imageQuery:", blog.imageQuery);
 
   const publishPayload = {
     title: blog.title,
@@ -405,12 +477,14 @@ async function main() {
     excerpt: blog.excerpt,
     content: blog.content,
     image: cover.url,
+    alt: imageAlt,
+    image_alt: imageAlt,
     image_credit: cover.imageCredit ?? undefined,
     category: topicEntry.category,
     tags: blog.tags ?? blog.keywords,
     meta_title: blog.meta_title,
     meta_description: blog.meta_description,
-    keywords: blog.keywords,
+    keywords: publishKeywords,
     faqs: blog.faqs,
     faqSchema,
     author,
@@ -429,7 +503,7 @@ async function main() {
       date,
       topicKey,
       title: blog.title,
-      keywords: blog.keywords ?? topicEntry.keywords,
+      keywords: publishKeywords,
       category: topicEntry.category,
       service: topicEntry.service ?? "",
       source,
@@ -439,13 +513,14 @@ async function main() {
 
     log.published.push({
       date,
-      keyword: topicEntry.keywords[0],
+      keyword: publishKeywords[0],
       title: blog.title,
-      keywords: blog.keywords ?? topicEntry.keywords,
+      keywords: publishKeywords,
       url: successLog.url,
       status: "success",
       source,
-      unsplashId: cover.unsplashId || null,
+      unsplashId: cover.unsplashId || cover.imageId || null,
+      imageQuery: blog.imageQuery || null,
     });
     writeJson("published_log.json", log);
     await logPublishToApi(successLog);
