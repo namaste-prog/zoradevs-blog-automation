@@ -1,16 +1,36 @@
 /**
  * Layer 2 & 4 — Groq trend filter + B2B content engine.
+ * Blog body is written in 3 parts so we hit 2000+ words under Groq's ~12k TPM cap.
  */
 import { callGroq, parseJson, sleep } from "./groq.js";
 
 const BLOCKED = ["politics", "crypto hype", "celebrity gossip", "adult content", "US-only consumer tech"];
 const MIN_WORDS = 2000;
-const MAX_WORDS = 2400;
-// Groq free/on_demand TPM ~12k includes prompt + completion. Keep completion under ~7.5k.
-const WRITER_MAX_TOKENS = Number(process.env.GROQ_WRITER_MAX_TOKENS ?? 7500);
+const MAX_WORDS = 2800;
+const PART_MAX_TOKENS = Number(process.env.GROQ_PART_MAX_TOKENS ?? 4500);
+const META_MAX_TOKENS = Number(process.env.GROQ_META_MAX_TOKENS ?? 3500);
 
 function countWords(text) {
   return String(text || "").split(/\s+/).filter(Boolean).length;
+}
+
+function regionInstruction(regionFocus) {
+  return regionFocus === "pan-india"
+    ? "Use Pan-India framing, but still mention Delhi NCR / Noida presence of Zoradevs where natural."
+    : "PRIMARY GEO FOCUS: Delhi NCR (Noida, Gurgaon/Gurugram, Delhi, Greater Noida). Mention local business context, hiring, and delivery advantages. Pan-India only as supporting context.";
+}
+
+function briefBlock(brief) {
+  return `SERVICE FOCUS: ${brief.service}
+TOPIC: ${brief.topic}
+PRIMARY KEYWORD: ${brief.primaryKeyword}
+SECONDARY KEYWORDS: ${brief.secondaryKeywords.join(", ")}
+CATEGORY: ${brief.category}
+TITLE ANGLE: ${brief.titleAngle}
+REGION ANGLE: ${brief.indiaAngle}
+REGION FOCUS: ${brief.regionFocus || "delhi-ncr"}
+
+${regionInstruction(brief.regionFocus || "delhi-ncr")}`;
 }
 
 export function buildTrendFilterPrompt({
@@ -86,61 +106,86 @@ Return JSON only:
 }`;
 }
 
-export function buildBlogWriterPrompt(brief) {
-  const regionFocus = brief.regionFocus || "delhi-ncr";
-  const regionInstruction =
-    regionFocus === "pan-india"
-      ? "Use Pan-India framing, but still mention Delhi NCR / Noida presence of Zoradevs where natural."
-      : "PRIMARY GEO FOCUS: Delhi NCR (Noida, Gurgaon/Gurugram, Delhi, Greater Noida). Mention local business context, hiring, and delivery advantages. Pan-India only as supporting context.";
+function buildMetaPrompt(brief) {
+  return `You are an expert B2B SEO writer for Zoradevs (Noida / Delhi NCR).
 
-  return `You are an expert B2B content writer for Zoradevs, a software development company in Noida (Delhi NCR), India.
+${briefBlock(brief)}
 
-Write a fresh, original blog for B2B buyers (startups, CTOs, founders).
+Return ONLY metadata JSON (no full article body yet). CRITICAL: escape newlines in strings as \\n.
 
-SERVICE FOCUS: ${brief.service}
-TOPIC: ${brief.topic}
-PRIMARY KEYWORD: ${brief.primaryKeyword}
-SECONDARY KEYWORDS: ${brief.secondaryKeywords.join(", ")}
-CATEGORY: ${brief.category}
-TITLE ANGLE: ${brief.titleAngle}
-REGION ANGLE: ${brief.indiaAngle}
-REGION FOCUS: ${regionFocus}
-
-${regionInstruction}
-
-Requirements:
-- 2000-2400 words in "content" (strict minimum 2000 words — aim for more depth, not filler)
-- Cover: intro, market context (Delhi NCR / India), problem, solution approach, implementation steps, AI angle, ROI/business impact, common mistakes, conclusion
-- Use markdown headings: ## for main sections (H2), ### for subsections (H3) — never show raw # symbols as plain text
-- Use bullet lists with "- " prefix where helpful
-- Strong B2B tone — practical, Delhi NCR / India-market specific
-- Naturally weave AI into the narrative (AI is trending — every post must connect to AI)
-- Include 2-3 natural CTAs to contact Zoradevs for ${brief.service}
-- Do NOT include FAQ section in content (use "faqs" array only)
-- meta_title: 50-60 chars, include Zoradevs
-- meta_description: 150-160 chars
-- excerpt: max 300 chars
-- slug: lowercase hyphens only
-- tags: 5 tags (at least one must include AI)
-- keywords: exactly 5 SEO keywords — at least one MUST contain "AI" or "artificial intelligence"
-- faqs: exactly 5 People Also Ask style Q&As
-
-Return JSON only. CRITICAL: escape all newlines inside string values as \\n (no raw line breaks inside JSON strings).
-
-Return JSON only:
 {
   "title": "...",
-  "slug": "...",
-  "excerpt": "...",
-  "content": "...",
-  "meta_title": "...",
-  "meta_description": "...",
-  "keywords": ["...", "...", "...", "...", "..."],
-  "tags": ["...", "...", "...", "...", "..."],
+  "slug": "lowercase-hyphens-only",
+  "excerpt": "max 300 chars",
+  "meta_title": "50-60 chars including Zoradevs",
+  "meta_description": "150-160 chars",
+  "keywords": ["5 SEO keywords", "must include AI", "...", "...", "..."],
+  "tags": ["5 tags", "include AI", "...", "...", "..."],
   "faqs": [
+    { "question": "...", "answer": "..." },
+    { "question": "...", "answer": "..." },
+    { "question": "...", "answer": "..." },
+    { "question": "...", "answer": "..." },
     { "question": "...", "answer": "..." }
   ]
 }`;
+}
+
+function buildPartPrompt(brief, title, part) {
+  const parts = {
+    1: {
+      label: "PART 1 of 3",
+      target: "700-900 words",
+      sections: `Write ONLY these sections in markdown:
+## Introduction
+## Why This Matters for Delhi NCR Businesses
+## The Core Problem Startups Face
+## Market Context in India and Delhi NCR
+
+Include practical examples for Noida / Gurgaon / Delhi founders. Weave AI naturally.`,
+    },
+    2: {
+      label: "PART 2 of 3",
+      target: "700-900 words",
+      sections: `Continue the SAME article titled "${title}". Do NOT repeat the intro.
+Write ONLY these sections in markdown:
+## Solution Approach with AI
+## Step-by-Step Implementation Guide
+## Recommended Tech Stack and Architecture
+## How Zoradevs Helps (${brief.service})
+
+Be detailed and actionable. Include one soft CTA to contact Zoradevs.`,
+    },
+    3: {
+      label: "PART 3 of 3",
+      target: "700-900 words",
+      sections: `Continue the SAME article titled "${title}". Do NOT repeat earlier sections.
+Write ONLY these sections in markdown:
+## Business Impact and ROI
+## Common Mistakes to Avoid
+## Checklist for Decision Makers
+## Conclusion and Next Steps
+
+End with a clear CTA to contact Zoradevs for ${brief.service}. Keep AI angle strong.`,
+    },
+  };
+
+  const cfg = parts[part];
+  return `You are an expert B2B content writer for Zoradevs.
+
+${briefBlock(brief)}
+
+ARTICLE TITLE: ${title}
+${cfg.label} — write ${cfg.target} of markdown body only.
+
+${cfg.sections}
+
+Rules:
+- Output JSON only: { "content": "markdown here with \\n for newlines" }
+- Use ## and ### headings only
+- No FAQ section in content
+- No title/H1 at the top
+- Dense, useful B2B writing — not filler`;
 }
 
 export async function filterTrendsWithGroq(ctx) {
@@ -153,7 +198,6 @@ export async function filterTrendsWithGroq(ctx) {
     throw new Error("Groq trend filter returned no candidates");
   }
 
-  // Prefer Delhi NCR candidates first, then Pan-India.
   const ranked = [...result.candidates].sort((a, b) => {
     const score = (c) => {
       const region = String(c.region_focus || "").toLowerCase();
@@ -169,50 +213,107 @@ export async function filterTrendsWithGroq(ctx) {
   return ranked;
 }
 
+async function writeContentPart(brief, title, part) {
+  const text = await callGroq(buildPartPrompt(brief, title, part), 0.55, {
+    maxTokens: PART_MAX_TOKENS,
+    maxRetries: 6,
+  });
+  const parsed = parseJson(text);
+  const content = String(parsed.content || "").trim();
+  if (!content || countWords(content) < 350) {
+    throw new Error(`Part ${part} too short (${countWords(content)} words)`);
+  }
+  console.log(`Part ${part} word count: ${countWords(content)}`);
+  return content;
+}
+
+async function expandIfNeeded(brief, title, content) {
+  const words = countWords(content);
+  if (words >= MIN_WORDS) return content;
+
+  const needed = MIN_WORDS - words + 150;
+  console.log(`Expanding blog by ~${needed} words (currently ${words})...`);
+  await sleep(15000);
+
+  const text = await callGroq(
+    `Expand this Zoradevs B2B blog. Keep existing sections. Add deeper detail under existing H2/H3 headings and/or add:
+## Real-World Use Cases in Delhi NCR
+## Budget and Timeline Considerations
+
+Target: add about ${needed} words. Return JSON only: { "content": "full expanded markdown with \\n" }
+
+TITLE: ${title}
+TOPIC: ${brief.topic}
+PRIMARY KEYWORD: ${brief.primaryKeyword}
+
+CURRENT CONTENT:
+${content.slice(0, 9000)}`,
+    0.5,
+    { maxTokens: PART_MAX_TOKENS, maxRetries: 5 }
+  );
+
+  const parsed = parseJson(text);
+  const expanded = String(parsed.content || "").trim();
+  return expanded.length > content.length ? expanded : content;
+}
+
 export async function writeB2BBlog(brief) {
-  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 50);
+  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 40);
   console.log(`Waiting ${delaySec}s before Groq writer (avoids 429 rate limit)...`);
   await sleep(delaySec * 1000);
 
-  let lastError;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const prompt =
-        attempt === 1
-          ? buildBlogWriterPrompt(brief)
-          : `${buildBlogWriterPrompt(brief)}\n\nIMPORTANT: Previous response was invalid or too short. Return STRICT valid JSON with at least ${MIN_WORDS} words in "content". Use \\n for line breaks inside strings. Use ## and ### for headings only (not raw # in paragraph text).`;
-
-      const text = await callGroq(prompt, 0.55, {
-        maxTokens: WRITER_MAX_TOKENS,
-        maxRetries: 6,
-      });
-      const blog = parseJson(text);
-      if (!blog.title || !blog.content || !blog.faqs?.length) {
-        throw new Error("Groq writer returned incomplete blog");
-      }
-      const words = countWords(blog.content);
-      console.log(`Blog word count: ${words}`);
-      if (words < MIN_WORDS && attempt < 2) {
-        throw new Error(`Blog too short (${words} words, need ${MIN_WORDS}+)`);
-      }
-      // Final attempt: accept 1800+ so the daily publish still goes out under token limits.
-      if (words < MIN_WORDS && words >= 1800) {
-        console.warn(`Accepting ${words} words on final attempt (target ${MIN_WORDS}+)`);
-        return blog;
-      }
-      if (words < 1800) {
-        throw new Error(`Blog too short (${words} words, need at least 1800)`);
-      }
-      if (words > MAX_WORDS + 200) {
-        console.warn(`Blog is ${words} words (target ${MIN_WORDS}-${MAX_WORDS})`);
-      }
-      return blog;
-    } catch (err) {
-      lastError = err;
-      console.warn(`Groq writer attempt ${attempt} failed:`, err.message);
-      if (attempt < 2) await sleep(10000);
-    }
+  console.log("Writer pass: metadata + FAQs...");
+  const metaText = await callGroq(buildMetaPrompt(brief), 0.45, {
+    maxTokens: META_MAX_TOKENS,
+    maxRetries: 6,
+  });
+  const meta = parseJson(metaText);
+  if (!meta.title || !meta.faqs?.length) {
+    throw new Error("Groq writer returned incomplete metadata");
   }
 
-  throw lastError ?? new Error("Groq writer failed");
+  const title = meta.title;
+  console.log("Writer pass: content part 1/3...");
+  await sleep(12000);
+  const part1 = await writeContentPart(brief, title, 1);
+
+  console.log("Writer pass: content part 2/3...");
+  await sleep(12000);
+  const part2 = await writeContentPart(brief, title, 2);
+
+  console.log("Writer pass: content part 3/3...");
+  await sleep(12000);
+  const part3 = await writeContentPart(brief, title, 3);
+
+  let content = [part1, part2, part3].join("\n\n").trim();
+  let words = countWords(content);
+  console.log(`Combined blog word count: ${words}`);
+
+  if (words < MIN_WORDS) {
+    content = await expandIfNeeded(brief, title, content);
+    words = countWords(content);
+    console.log(`Expanded blog word count: ${words}`);
+  }
+
+  if (words < 1800) {
+    throw new Error(`Blog too short after multi-part write (${words} words, need at least 1800)`);
+  }
+  if (words < MIN_WORDS) {
+    console.warn(`Accepting ${words} words (target ${MIN_WORDS}+) after multi-part + expand`);
+  }
+  if (words > MAX_WORDS + 400) {
+    console.warn(`Blog is ${words} words (target ${MIN_WORDS}-${MAX_WORDS})`);
+  }
+
+  return {
+    title: meta.title,
+    slug: meta.slug,
+    excerpt: meta.excerpt,
+    content,
+    meta_title: meta.meta_title,
+    meta_description: meta.meta_description,
+    keywords: meta.keywords,
+    tags: meta.tags,
+    faqs: meta.faqs,
+  };
 }
