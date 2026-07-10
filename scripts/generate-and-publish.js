@@ -67,6 +67,12 @@ function calcReadTime(content) {
   return `${Math.max(1, Math.round(words / 200))} min read`;
 }
 
+const BLOG_AUTHORS = ["Mansi", "Parul", "Nikhil"];
+
+function pickRandomAuthor() {
+  return BLOG_AUTHORS[Math.floor(Math.random() * BLOG_AUTHORS.length)];
+}
+
 async function fetchAutomationConfig() {
   const res = await axios.get(BLOG_AUTOMATION_URL, {
     headers: { Authorization: `Bearer ${BLOG_API_SECRET}` },
@@ -332,6 +338,9 @@ async function main() {
     saveUsedUnsplashId(cover.unsplashId);
   }
 
+  const author = pickRandomAuthor();
+  console.log("Author:", author);
+
   const publishPayload = {
     title: blog.title,
     slug: blog.slug,
@@ -346,7 +355,7 @@ async function main() {
     keywords: blog.keywords,
     faqs: blog.faqs,
     faqSchema,
-    author: "Zoradevs",
+    author,
     read_time: calcReadTime(blog.content),
     published: true,
     service: topicEntry.service ?? "",
