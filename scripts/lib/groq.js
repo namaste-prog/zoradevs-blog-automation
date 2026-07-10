@@ -1,8 +1,8 @@
 /**
- * Groq API helpers — TPD/TPM-aware retries, model fallback, capped waits.
+ * Groq API helpers — TPD/TPM-aware retries, sticky model fallback, capped waits.
  *
  * Free on_demand `llama-3.3-70b-versatile` has a low tokens-per-day (TPD) cap (~100k).
- * When that model is exhausted, we switch to GROQ_FALLBACK_MODEL (separate quota).
+ * Once that model is exhausted, stick to GROQ_FALLBACK_MODEL for the rest of the run.
  */
 import axios from "axios";
 import { jsonrepair } from "jsonrepair";
@@ -15,8 +15,19 @@ export const GROQ_FALLBACK_MODEL =
 /** Hard cap so CI never stalls for 10–15 minutes on a single 429. */
 const MAX_429_WAIT_MS = Number(process.env.GROQ_MAX_429_WAIT_SEC ?? 60) * 1000;
 
+/** Once primary TPD is hit, never call it again in this process. */
+let stickyModel = null;
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function getActiveGroqModel() {
+  return stickyModel || GROQ_MODEL;
+}
+
+export function isUsingFallbackModel() {
+  return getActiveGroqModel() === GROQ_FALLBACK_MODEL;
 }
 
 function extractJsonBlob(text) {
@@ -63,7 +74,6 @@ export function isDailyTokenLimit(err) {
 
 function isTokenBudgetError(err) {
   const msg = errorBodyMessage(err).toLowerCase();
-  // Request too large for a single call — NOT daily TPD.
   if (isDailyTokenLimit(err)) return false;
   return (
     msg.includes("request too large") ||
@@ -91,10 +101,6 @@ function groqErrorMessage(err, model) {
   return msg;
 }
 
-/**
- * Parse Retry-After header or "try again in XmYs" from error body.
- * Always capped by MAX_429_WAIT_MS.
- */
 function resolve429WaitMs(err, attempt) {
   const header = err.response?.headers?.["retry-after"];
   let suggestedMs = 0;
@@ -120,6 +126,14 @@ function resolve429WaitMs(err, attempt) {
   const backoffMs = Math.min(45000, 6000 * (attempt + 1));
   const raw = suggestedMs > 0 ? suggestedMs : backoffMs;
   return Math.min(raw, MAX_429_WAIT_MS);
+}
+
+function switchToFallback(fromModel) {
+  if (stickyModel === GROQ_FALLBACK_MODEL) return;
+  stickyModel = GROQ_FALLBACK_MODEL;
+  console.warn(
+    `Groq TPD exhausted on \`${fromModel}\` — sticky fallback for this run: \`${GROQ_FALLBACK_MODEL}\``
+  );
 }
 
 async function postChat({ model, prompt, temperature, maxTokens }) {
@@ -152,15 +166,11 @@ export async function callGroq(prompt, temperature = 0.6, options = {}) {
 
   let maxTokens = Math.min(options.maxTokens ?? 3000, Number(process.env.GROQ_MAX_TOKENS ?? 4500));
   const maxRetries = options.maxRetries ?? 3;
-  let model = options.model || GROQ_MODEL;
-  let usedFallback = false;
+  let model = options.model || stickyModel || GROQ_MODEL;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const res = await postChat({ model, prompt, temperature, maxTokens });
-      if (usedFallback) {
-        console.log(`Groq OK via fallback model: ${model}`);
-      }
       return res.data.choices?.[0]?.message?.content ?? "";
     } catch (err) {
       const status = err.response?.status;
@@ -168,19 +178,14 @@ export async function callGroq(prompt, temperature = 0.6, options = {}) {
       const tokenBudgetHit = isTokenBudgetError(err);
       const isRetryable = status === 429 || status === 503 || tokenBudgetHit;
 
-      // Daily quota on primary model → switch once to fallback (separate TPD pool).
-      if (dailyHit && !usedFallback && model !== GROQ_FALLBACK_MODEL) {
-        console.warn(
-          `Groq TPD exhausted on \`${model}\` — switching to fallback \`${GROQ_FALLBACK_MODEL}\` (no long wait).`
-        );
+      if (dailyHit && model !== GROQ_FALLBACK_MODEL) {
+        switchToFallback(model);
         model = GROQ_FALLBACK_MODEL;
-        usedFallback = true;
-        maxTokens = Math.min(maxTokens, 3500);
-        await sleep(1500);
+        maxTokens = Math.min(Math.max(maxTokens, 3500), 4500);
+        await sleep(1000);
         continue;
       }
 
-      // Daily quota on fallback too → fail immediately (retries won't help for hours).
       if (dailyHit) {
         const error = new Error(groqErrorMessage(err, model));
         error.status = 429;
@@ -211,7 +216,6 @@ export async function callGroq(prompt, temperature = 0.6, options = {}) {
 
       const error = new Error(groqErrorMessage(err, model));
       error.status = status;
-      if (dailyHit) error.code = "GROQ_TPD";
       throw error;
     }
   }

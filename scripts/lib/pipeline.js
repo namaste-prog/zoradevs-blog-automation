@@ -2,13 +2,17 @@
  * Layer 2 & 4 — Service-based topic generation + B2B content engine.
  * Blog body is written in 3 parts so we hit 2000+ words under Groq's ~12k TPM cap.
  */
-import { callGroq, parseJson, sleep } from "./groq.js";
+import { callGroq, parseJson, sleep, isUsingFallbackModel } from "./groq.js";
 
 const BLOCKED = ["politics", "crypto hype", "celebrity gossip", "adult content", "US-only consumer tech"];
 const MIN_WORDS = 2000;
 const MAX_WORDS = 2800;
+/** Absolute floor — publish rather than fail when fallback model writes shorter. */
+const ABSOLUTE_MIN_WORDS = Number(process.env.GROQ_ABSOLUTE_MIN_WORDS ?? 1400);
 const PART_MAX_TOKENS = Number(process.env.GROQ_PART_MAX_TOKENS ?? 3200);
-const META_MAX_TOKENS = Number(process.env.GROQ_META_MAX_TOKENS ?? 2200);
+const META_MAX_TOKENS = Number(process.env.GROQ_META_MAX_TOKENS ?? 3500);
+const TARGET_FAQ_COUNT = 10;
+const MIN_FAQ_COUNT = 8;
 /** Pause between large Groq writes so TPM (~12k/min) can refill. */
 const PART_DELAY_MS = Number(process.env.GROQ_PART_DELAY_SEC ?? 25) * 1000;
 
@@ -161,6 +165,11 @@ KEYWORDS / TAGS (geo belongs HERE only):
 Also return imageQuery: a 4-5 word LITERAL physical scene for stock photography
 (e.g. "software developers working laptops office"). NEVER abstract concepts like "innovation" or "digital transformation".
 
+FAQs (critical for SEO):
+- Return EXACTLY 10 FAQ items
+- Each question must be specific to the topic and useful for founders/CTOs
+- Each answer must be 2–4 sentences, practical, not fluff
+
 Return ONLY metadata JSON (no full article body yet). CRITICAL: escape newlines in strings as \\n.
 
 {
@@ -173,11 +182,16 @@ Return ONLY metadata JSON (no full article body yet). CRITICAL: escape newlines 
   "tags": ["5 tags", "include AI", "...", "...", "..."],
   "imageQuery": "four or five word physical scene",
   "faqs": [
-    { "question": "...", "answer": "..." },
-    { "question": "...", "answer": "..." },
-    { "question": "...", "answer": "..." },
-    { "question": "...", "answer": "..." },
-    { "question": "...", "answer": "..." }
+    { "question": "FAQ 1?", "answer": "..." },
+    { "question": "FAQ 2?", "answer": "..." },
+    { "question": "FAQ 3?", "answer": "..." },
+    { "question": "FAQ 4?", "answer": "..." },
+    { "question": "FAQ 5?", "answer": "..." },
+    { "question": "FAQ 6?", "answer": "..." },
+    { "question": "FAQ 7?", "answer": "..." },
+    { "question": "FAQ 8?", "answer": "..." },
+    { "question": "FAQ 9?", "answer": "..." },
+    { "question": "FAQ 10?", "answer": "..." }
   ]
 }`;
 }
@@ -240,7 +254,8 @@ Rules:
 - Use ## and ### headings only
 - No FAQ section in content
 - No title/H1 at the top
-- Dense, useful B2B writing — not filler`;
+- Dense, useful B2B writing — not filler
+- HARD REQUIREMENT: this part must be at least 650 words (prefer ${cfg.target})`;
 }
 
 /**
@@ -332,7 +347,7 @@ function normalizeImageQuery(raw, fallbackKeywords = []) {
 }
 
 async function writeContentPart(brief, title, part) {
-  const minWords = 300;
+  const minWords = 400;
   let lastError;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -341,11 +356,12 @@ async function writeContentPart(brief, title, part) {
       const prompt = useMarkdownOnly
         ? `${buildPartPrompt(brief, title, part)}
 
-IMPORTANT: Return ONLY markdown body text. Do NOT wrap in JSON. Do NOT use code fences. Start directly with ## heading.`
+IMPORTANT: Return ONLY markdown body text. Do NOT wrap in JSON. Do NOT use code fences. Start directly with ## heading.
+HARD REQUIREMENT: write at least 650 words for this part.`
         : buildPartPrompt(brief, title, part);
 
       const text = await callGroq(prompt, 0.55, {
-        maxTokens: PART_MAX_TOKENS,
+        maxTokens: Math.max(PART_MAX_TOKENS, isUsingFallbackModel() ? 4000 : PART_MAX_TOKENS),
         maxRetries: 4,
       });
 
@@ -361,42 +377,119 @@ IMPORTANT: Return ONLY markdown body text. Do NOT wrap in JSON. Do NOT use code 
     } catch (err) {
       lastError = err;
       console.warn(`Part ${part} attempt ${attempt} failed:`, err.message);
-      if (attempt < 3) await sleep(Math.min(PART_DELAY_MS, 20000));
+      if (attempt < 3) await sleep(partDelayMs());
     }
   }
 
   throw lastError ?? new Error(`Part ${part} failed after retries`);
 }
 
+function partDelayMs() {
+  // Fallback 8B models usually have higher TPM — shorter pause.
+  if (isUsingFallbackModel()) {
+    return Number(process.env.GROQ_FALLBACK_PART_DELAY_SEC ?? 8) * 1000;
+  }
+  return PART_DELAY_MS;
+}
+
+/**
+ * Append-only expansion — small models often fail at rewriting the full article.
+ */
 async function expandIfNeeded(brief, title, content) {
   const words = countWords(content);
   if (words >= MIN_WORDS) return content;
 
-  const needed = MIN_WORDS - words + 150;
-  console.log(`Expanding blog by ~${needed} words (currently ${words})...`);
-  await sleep(PART_DELAY_MS);
+  const needed = Math.max(400, MIN_WORDS - words + 100);
+  console.log(`Appending ~${needed} words (currently ${words})...`);
+  await sleep(partDelayMs());
 
   const text = await callGroq(
-    `Expand this Zoradevs B2B blog. Keep existing sections. Add deeper detail under existing H2/H3 headings and/or add:
+    `You are expanding a ZoraDevs B2B blog. Do NOT rewrite existing sections.
+Write ONLY new markdown sections to APPEND (start with ##). Target about ${needed} words total across these headings:
+
 ## Real-World Use Cases
 ## Budget and Timeline Considerations
+## Implementation Pitfalls and How to Avoid Them
 
-Target: add about ${needed} words. Return ONLY the full expanded markdown body (no JSON, no code fences).
-Do NOT change or remove the final ZoraDevs closing paragraph if present.
-Do NOT force location names or years into new headings — keep headings natural.
+Rules:
+- Return ONLY the new sections (markdown). No JSON. No code fences.
+- Do not repeat the title or earlier sections.
+- Dense, practical B2B detail. Weave AI naturally.
+- No location/year stuffing in headings.
+
+ARTICLE TITLE: ${title}
+TOPIC: ${brief.topic}
+PRIMARY KEYWORD: ${brief.primaryKeyword}
+EXISTING TAIL (context only — do not copy):
+${content.slice(-1200)}`,
+    0.55,
+    {
+      maxTokens: Math.max(PART_MAX_TOKENS, 4000),
+      maxRetries: 4,
+    }
+  );
+
+  const addition = extractContentFromResponse(text).trim();
+  const addWords = countWords(addition);
+  if (!addition || addWords < 120) {
+    console.warn(`Expand append too short (${addWords} words) — keeping original length`);
+    return content;
+  }
+
+  // Strip closing paragraph from body before append; re-added later.
+  const body = content
+    .replace(/\n*At ZoraDevs, an AI development company based in Noida[\s\S]*$/i, "")
+    .trim();
+  const merged = `${body}\n\n${addition}`;
+  console.log(`Appended ${addWords} words → ${countWords(merged)} total`);
+  return merged;
+}
+
+function normalizeFaqs(faqs) {
+  if (!Array.isArray(faqs)) return [];
+  return faqs
+    .map((f) => ({
+      question: String(f?.question || "").trim(),
+      answer: String(f?.answer || "").trim(),
+    }))
+    .filter((f) => f.question.length >= 5 && f.answer.length >= 10)
+    .slice(0, TARGET_FAQ_COUNT);
+}
+
+async function ensureTenFaqs(brief, title, existingFaqs = []) {
+  let faqs = normalizeFaqs(existingFaqs);
+  if (faqs.length >= MIN_FAQ_COUNT) {
+    return faqs.slice(0, TARGET_FAQ_COUNT);
+  }
+
+  console.warn(
+    `Only ${faqs.length} FAQs from metadata — generating dedicated FAQ set (target ${TARGET_FAQ_COUNT})...`
+  );
+
+  const text = await callGroq(
+    `Generate EXACTLY ${TARGET_FAQ_COUNT} SEO FAQs for this ZoraDevs B2B blog.
 
 TITLE: ${title}
 TOPIC: ${brief.topic}
+SERVICE: ${brief.service}
 PRIMARY KEYWORD: ${brief.primaryKeyword}
 
-CURRENT CONTENT:
-${content.slice(0, 7000)}`,
-    0.5,
-    { maxTokens: PART_MAX_TOKENS, maxRetries: 4 }
+Rules:
+- Exactly ${TARGET_FAQ_COUNT} items
+- Questions founders/CTOs would actually search
+- Answers 2–4 sentences, practical
+- Return JSON only: { "faqs": [ { "question": "...", "answer": "..." } ] }
+- Escape newlines in strings as \\n`,
+    0.4,
+    { maxTokens: 3500, maxRetries: 4 }
   );
 
-  const expanded = extractContentFromResponse(text);
-  return countWords(expanded) > countWords(content) ? expanded : content;
+  const parsed = parseJson(text);
+  faqs = normalizeFaqs(parsed.faqs);
+  if (faqs.length < MIN_FAQ_COUNT) {
+    throw new Error(`FAQ generation returned only ${faqs.length} valid items (need ${MIN_FAQ_COUNT}+)`);
+  }
+  return faqs.slice(0, TARGET_FAQ_COUNT);
 }
 
 /**
@@ -408,11 +501,13 @@ export async function writeBlogMetadata(brief) {
     maxRetries: 4,
   });
   const meta = parseJson(metaText);
-  if (!meta.title || !meta.faqs?.length) {
-    throw new Error("Groq writer returned incomplete metadata");
+  if (!meta.title) {
+    throw new Error("Groq writer returned incomplete metadata (missing title)");
   }
 
+  meta.faqs = await ensureTenFaqs(brief, meta.title, meta.faqs);
   meta.imageQuery = normalizeImageQuery(meta.imageQuery, meta.keywords || brief.secondaryKeywords);
+  console.log(`Metadata FAQs ready: ${meta.faqs.length}`);
   return meta;
 }
 
@@ -421,44 +516,45 @@ export async function writeBlogMetadata(brief) {
  */
 export async function writeB2BBlogBody(brief, meta) {
   const title = meta.title;
-  console.log(`Writer pass: content part 1/3 (waiting ${PART_DELAY_MS / 1000}s for TPM)...`);
-  await sleep(PART_DELAY_MS);
+  const delay = partDelayMs();
+
+  console.log(`Writer pass: content part 1/3 (waiting ${delay / 1000}s for TPM)...`);
+  await sleep(delay);
   const part1 = await writeContentPart(brief, title, 1);
 
-  console.log(`Writer pass: content part 2/3 (waiting ${PART_DELAY_MS / 1000}s for TPM)...`);
-  await sleep(PART_DELAY_MS);
+  console.log(`Writer pass: content part 2/3 (waiting ${partDelayMs() / 1000}s for TPM)...`);
+  await sleep(partDelayMs());
   const part2 = await writeContentPart(brief, title, 2);
 
-  console.log(`Writer pass: content part 3/3 (waiting ${PART_DELAY_MS / 1000}s for TPM)...`);
-  await sleep(PART_DELAY_MS);
+  console.log(`Writer pass: content part 3/3 (waiting ${partDelayMs() / 1000}s for TPM)...`);
+  await sleep(partDelayMs());
   const part3 = await writeContentPart(brief, title, 3);
 
   let content = [part1, part2, part3].join("\n\n").trim();
   let words = countWords(content);
   console.log(`Combined blog word count: ${words}`);
 
-  if (words < MIN_WORDS) {
+  // Up to 3 append-only expand passes.
+  for (let pass = 1; pass <= 3 && words < MIN_WORDS; pass++) {
+    console.log(`Expand pass ${pass}/3...`);
     content = await expandIfNeeded(brief, title, content);
     words = countWords(content);
-    console.log(`Expanded blog word count: ${words}`);
-  }
-
-  if (words < MIN_WORDS) {
-    console.log("Running second expand pass...");
-    await sleep(PART_DELAY_MS);
-    content = await expandIfNeeded(brief, title, content);
-    words = countWords(content);
-    console.log(`Second expand word count: ${words}`);
+    console.log(`After expand pass ${pass}: ${words} words`);
   }
 
   content = ensureZoradevsClosing(content);
   words = countWords(content);
 
-  if (words < 1500) {
-    throw new Error(`Blog too short after multi-part write (${words} words, need at least 1500)`);
+  if (words < ABSOLUTE_MIN_WORDS) {
+    throw new Error(
+      `Blog too short after multi-part write (${words} words, need at least ${ABSOLUTE_MIN_WORDS})`
+    );
   }
   if (words < MIN_WORDS) {
-    console.warn(`Accepting ${words} words (target ${MIN_WORDS}+) after multi-part + expand`);
+    console.warn(
+      `Accepting ${words} words (target ${MIN_WORDS}+; absolute min ${ABSOLUTE_MIN_WORDS})` +
+        (isUsingFallbackModel() ? " [fallback model]" : "")
+    );
   }
   if (words > MAX_WORDS + 400) {
     console.warn(`Blog is ${words} words (target ${MIN_WORDS}-${MAX_WORDS})`);
@@ -495,7 +591,7 @@ export async function writeB2BBlog(brief, { maxTitleRetries = 3 } = {}) {
       `Title missing "AI" (attempt ${attempt}): "${meta.title}" — regenerating metadata...`
     );
     meta = null;
-    if (attempt < maxTitleRetries) await sleep(PART_DELAY_MS);
+    if (attempt < maxTitleRetries) await sleep(partDelayMs());
   }
 
   if (!meta || !titleContainsAi(meta.title)) {

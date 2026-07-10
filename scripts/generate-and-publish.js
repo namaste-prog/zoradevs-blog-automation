@@ -455,6 +455,11 @@ async function main() {
   }
 
   const faqSchema = buildFaqSchema(blog.faqs);
+  if (!faqSchema?.mainEntity?.length) {
+    console.error("FAQ schema missing — aborting publish (need FAQs for SEO)");
+    process.exit(1);
+  }
+  console.log(`FAQ schema ready: ${faqSchema.mainEntity.length} questions`);
 
   const usedFromLog = (log.published || [])
     .map((p) => p.unsplashId)
