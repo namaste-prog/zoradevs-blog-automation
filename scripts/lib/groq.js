@@ -48,6 +48,16 @@ function groqErrorMessage(err) {
   return msg;
 }
 
+function isTokenBudgetError(err) {
+  const msg = String(err.response?.data?.error?.message ?? err.message ?? "").toLowerCase();
+  return (
+    msg.includes("request too large") ||
+    msg.includes("tokens per minute") ||
+    msg.includes("tpm") ||
+    msg.includes("please reduce your message size")
+  );
+}
+
 /**
  * @param {object} [options]
  * @param {number} [options.maxTokens]
@@ -56,7 +66,8 @@ function groqErrorMessage(err) {
 export async function callGroq(prompt, temperature = 0.6, options = {}) {
   if (!GROQ_API_KEY) throw new Error("Missing GROQ_API_KEY");
 
-  const maxTokens = options.maxTokens ?? 4096;
+  // Free/on_demand tier TPM is often 12k (prompt + max_tokens). Keep headroom for the prompt.
+  let maxTokens = Math.min(options.maxTokens ?? 4096, Number(process.env.GROQ_MAX_TOKENS ?? 8000));
   const maxRetries = options.maxRetries ?? 5;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -81,9 +92,20 @@ export async function callGroq(prompt, temperature = 0.6, options = {}) {
       return res.data.choices?.[0]?.message?.content ?? "";
     } catch (err) {
       const status = err.response?.status;
-      const isRetryable = status === 429 || status === 503;
+      const tokenBudgetHit = isTokenBudgetError(err);
+      const isRetryable = status === 429 || status === 503 || tokenBudgetHit;
 
       if (isRetryable && attempt < maxRetries) {
+        if (tokenBudgetHit) {
+          const next = Math.max(3500, Math.floor(maxTokens * 0.7));
+          console.warn(
+            `Groq token budget exceeded (requested max_tokens=${maxTokens}) — retrying with ${next}...`
+          );
+          maxTokens = next;
+          await sleep(2000);
+          continue;
+        }
+
         const retryAfterHeader = err.response?.headers?.["retry-after"];
         const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
         const waitMs =
