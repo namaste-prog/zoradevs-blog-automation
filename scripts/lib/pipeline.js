@@ -5,7 +5,9 @@ import { callGroq, parseJson, sleep } from "./groq.js";
 
 const BLOCKED = ["politics", "crypto hype", "celebrity gossip", "adult content", "US-only consumer tech"];
 const MIN_WORDS = 2000;
-const MAX_WORDS = 2600;
+const MAX_WORDS = 2400;
+// Groq free/on_demand TPM ~12k includes prompt + completion. Keep completion under ~7.5k.
+const WRITER_MAX_TOKENS = Number(process.env.GROQ_WRITER_MAX_TOKENS ?? 7500);
 
 function countWords(text) {
   return String(text || "").split(/\s+/).filter(Boolean).length;
@@ -107,7 +109,7 @@ REGION FOCUS: ${regionFocus}
 ${regionInstruction}
 
 Requirements:
-- 2000-2600 words in "content" (strict minimum 2000 words — aim for more depth, not filler)
+- 2000-2400 words in "content" (strict minimum 2000 words — aim for more depth, not filler)
 - Cover: intro, market context (Delhi NCR / India), problem, solution approach, implementation steps, AI angle, ROI/business impact, common mistakes, conclusion
 - Use markdown headings: ## for main sections (H2), ### for subsections (H3) — never show raw # symbols as plain text
 - Use bullet lists with "- " prefix where helpful
@@ -181,7 +183,7 @@ export async function writeB2BBlog(brief) {
           : `${buildBlogWriterPrompt(brief)}\n\nIMPORTANT: Previous response was invalid or too short. Return STRICT valid JSON with at least ${MIN_WORDS} words in "content". Use \\n for line breaks inside strings. Use ## and ### for headings only (not raw # in paragraph text).`;
 
       const text = await callGroq(prompt, 0.55, {
-        maxTokens: 16000,
+        maxTokens: WRITER_MAX_TOKENS,
         maxRetries: 6,
       });
       const blog = parseJson(text);
@@ -193,7 +195,7 @@ export async function writeB2BBlog(brief) {
       if (words < MIN_WORDS && attempt < 2) {
         throw new Error(`Blog too short (${words} words, need ${MIN_WORDS}+)`);
       }
-      // Final attempt: accept 1800+ so the daily publish still goes out.
+      // Final attempt: accept 1800+ so the daily publish still goes out under token limits.
       if (words < MIN_WORDS && words >= 1800) {
         console.warn(`Accepting ${words} words on final attempt (target ${MIN_WORDS}+)`);
         return blog;
