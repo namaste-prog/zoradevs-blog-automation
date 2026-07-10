@@ -33,9 +33,13 @@ export function buildTrendFilterPrompt({
 
   const scrapedSample = scrapedText.slice(0, 2500);
 
-  return `You are a B2B SEO strategist for Zoradevs (Indian software development company).
+  return `You are a B2B SEO strategist for Zoradevs (software development company in Noida / Delhi NCR, India).
 
-TARGET AUDIENCE: Indian startups, SMEs, and enterprises buying Web Dev, Mobile Apps, AI/ML automation.
+TARGET AUDIENCE (priority order):
+1. PRIMARY: Delhi NCR buyers — Noida, Gurgaon (Gurugram), Delhi, Greater Noida, Faridabad startups/SMEs/enterprises
+2. SECONDARY: Pan-India only if the topic is not strongly localizable to Delhi NCR
+
+Buyers care about Web Dev, Mobile Apps, AI/ML automation, staff augmentation.
 
 ZORADEVS SERVICES:
 ${serviceList}
@@ -48,12 +52,18 @@ ${trendsList || "No live trends — infer from market text pool."}
 WEBSITE INTELLIGENCE (Zoradevs + competitors — titles, H1/H2, meta):
 ${scrapedSample}
 
-TOPICS USED IN LAST 6 MONTHS (DO NOT REPEAT):
+TOPICS USED IN LAST 6 MONTHS (DO NOT REPEAT — no same topic, title, or keyword combo):
 ${recentList}
 
 BLOCKED: ${BLOCKED.join(", ")}
 
-Task: Return 5 unique B2B blog topic candidates for Indian market.
+HARD RULES:
+- Prefer Delhi NCR angles (Noida / Gurgaon / Delhi) in topic + keywords whenever possible
+- Fall back to Pan-India only when Delhi NCR does not fit
+- EVERY candidate keywords array MUST include AI (e.g. "AI", "AI automation", "artificial intelligence") because AI is trending
+- Never repeat or closely rephrase any topic from the 6-month list
+
+Task: Return 5 unique B2B blog topic candidates (Delhi NCR first, then Pan-India).
 
 Return JSON only. CRITICAL: escape all newlines inside string values as \\n (no raw line breaks inside JSON strings).
 
@@ -61,22 +71,29 @@ Return JSON only:
 {
   "candidates": [
     {
-      "topic": "one sentence angle",
+      "topic": "one sentence angle with Delhi NCR or India focus",
       "service": "exact service title from list",
       "category": "blog category",
-      "keywords": ["primary", "kw2", "kw3", "kw4", "kw5"],
+      "keywords": ["primary with AI + region", "kw2", "kw3", "kw4", "kw5"],
       "topic_key": "url-slug-dedup-key",
       "title_angle": "B2B title direction",
-      "india_angle": "why Indian businesses care"
+      "india_angle": "why Delhi NCR (or Pan-India) businesses care",
+      "region_focus": "delhi-ncr | pan-india"
     }
   ]
 }`;
 }
 
 export function buildBlogWriterPrompt(brief) {
-  return `You are an expert B2B content writer for Zoradevs, a software development company in Noida, India.
+  const regionFocus = brief.regionFocus || "delhi-ncr";
+  const regionInstruction =
+    regionFocus === "pan-india"
+      ? "Use Pan-India framing, but still mention Delhi NCR / Noida presence of Zoradevs where natural."
+      : "PRIMARY GEO FOCUS: Delhi NCR (Noida, Gurgaon/Gurugram, Delhi, Greater Noida). Mention local business context, hiring, and delivery advantages. Pan-India only as supporting context.";
 
-Write a fresh, original blog for Indian B2B buyers (startups, CTOs, founders).
+  return `You are an expert B2B content writer for Zoradevs, a software development company in Noida (Delhi NCR), India.
+
+Write a fresh, original blog for B2B buyers (startups, CTOs, founders).
 
 SERVICE FOCUS: ${brief.service}
 TOPIC: ${brief.topic}
@@ -84,21 +101,25 @@ PRIMARY KEYWORD: ${brief.primaryKeyword}
 SECONDARY KEYWORDS: ${brief.secondaryKeywords.join(", ")}
 CATEGORY: ${brief.category}
 TITLE ANGLE: ${brief.titleAngle}
-INDIA ANGLE: ${brief.indiaAngle}
+REGION ANGLE: ${brief.indiaAngle}
+REGION FOCUS: ${regionFocus}
+
+${regionInstruction}
 
 Requirements:
 - 1500-1800 words in "content" (strict minimum 1500 words)
 - Use markdown headings: ## for main sections (H2), ### for subsections (H3) — never show raw # symbols as plain text
 - Use bullet lists with "- " prefix where helpful
-- Strong B2B tone — practical, India-market specific
+- Strong B2B tone — practical, Delhi NCR / India-market specific
+- Naturally weave AI into the narrative (AI is trending — every post must connect to AI)
 - Include 2-3 natural CTAs to contact Zoradevs for ${brief.service}
 - Do NOT include FAQ section in content (use "faqs" array only)
 - meta_title: 50-60 chars, include Zoradevs
 - meta_description: 150-160 chars
 - excerpt: max 300 chars
 - slug: lowercase hyphens only
-- tags: 5 tags
-- keywords: 5 SEO keywords
+- tags: 5 tags (at least one must include AI)
+- keywords: exactly 5 SEO keywords — at least one MUST contain "AI" or "artificial intelligence"
 - faqs: exactly 5 People Also Ask style Q&As
 
 Return JSON only. CRITICAL: escape all newlines inside string values as \\n (no raw line breaks inside JSON strings).
@@ -128,7 +149,21 @@ export async function filterTrendsWithGroq(ctx) {
   if (!result.candidates?.length) {
     throw new Error("Groq trend filter returned no candidates");
   }
-  return result.candidates;
+
+  // Prefer Delhi NCR candidates first, then Pan-India.
+  const ranked = [...result.candidates].sort((a, b) => {
+    const score = (c) => {
+      const region = String(c.region_focus || "").toLowerCase();
+      const blob = `${c.topic || ""} ${c.india_angle || ""} ${(c.keywords || []).join(" ")}`.toLowerCase();
+      const isNcr =
+        region.includes("delhi") ||
+        /noida|gurgaon|gurugram|delhi ncr|greater noida|faridabad/.test(blob);
+      return isNcr ? 0 : 1;
+    };
+    return score(a) - score(b);
+  });
+
+  return ranked;
 }
 
 export async function writeB2BBlog(brief) {

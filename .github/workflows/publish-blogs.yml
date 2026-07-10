@@ -37,6 +37,6 @@ jobs:
         run: |
           git config user.name "Blog Bot"
           git config user.email "bot@zoradevs.com"
-          git add published_log.json linkedin_queue.txt
+          git add published_log.json linkedin_queue.txt used_unsplash_ids.json
           git diff --staged --quiet || git commit -m "Auto: published blog + linkedin post [skip ci]"
           git push

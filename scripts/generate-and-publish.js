@@ -16,9 +16,9 @@ import { discoverCompetitors } from "./lib/competitors.js";
 import { scrapeZoradevsAndCompetitors } from "./lib/scraper.js";
 import { fetchIndiaTrends } from "./lib/india-trends.js";
 import { filterTrendsWithGroq, writeB2BBlog } from "./lib/pipeline.js";
-import { pickUniqueCandidate, slugify } from "./lib/dedup.js";
+import { pickUniqueCandidate, slugify, ensureAiInKeywords, isDuplicate } from "./lib/dedup.js";
 import { buildFaqSchema } from "./lib/faq-schema.js";
-import { fetchBlogCoverImage } from "./lib/unsplash.js";
+import { fetchBlogCoverImage, saveUsedUnsplashId, loadUsedUnsplashIds } from "./lib/unsplash.js";
 import { GROQ_MODEL } from "./lib/groq.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -95,26 +95,31 @@ async function fetchKeywordEntry(daySlot) {
     });
     const data = res.data;
     if (!data?.keywords?.length) throw new Error("No keywords");
+    const withAi = ensureAiInKeywords(data.keywords);
     return {
       topic: data.topic ?? "",
-      keywords: data.keywords,
+      keywords: withAi,
       category: data.category,
       service: "Software Development",
-      topic_key: slugify(data.keywords[0]),
-      title_angle: data.topic || data.keywords[0],
-      india_angle: "Indian startups and SMEs",
+      topic_key: slugify(withAi[0]),
+      title_angle: data.topic || withAi[0],
+      india_angle: "Delhi NCR startups and SMEs (Noida, Gurgaon, Delhi), then Pan-India",
+      region_focus: "delhi-ncr",
       source: "manual-keywords",
     };
   } catch {
     const keywords = readJson("keywords.json");
     const entry = keywords.find((k) => k.day === daySlot);
     if (!entry) throw new Error(`No fallback keywords for day ${daySlot}`);
+    const withAi = ensureAiInKeywords(entry.keywords);
     return {
       ...entry,
+      keywords: withAi,
       service: entry.category,
-      topic_key: slugify(entry.keywords[0]),
-      title_angle: entry.topic || entry.keywords[0],
-      india_angle: "Indian startups and SMEs",
+      topic_key: slugify(withAi[0]),
+      title_angle: entry.topic || withAi[0],
+      india_angle: "Delhi NCR startups and SMEs (Noida, Gurgaon, Delhi), then Pan-India",
+      region_focus: "delhi-ncr",
       source: "fallback",
     };
   }
@@ -146,14 +151,27 @@ async function runB2BPipeline(config) {
     recentTopics: config.recentTopics ?? [],
   });
 
+  // Force AI into every candidate keyword set before dedup.
+  const withAi = candidates.map((c) => ({
+    ...c,
+    keywords: ensureAiInKeywords(c.keywords),
+    topic_key: slugify(c.topic_key || c.keywords?.[0] || c.topic),
+  }));
+
   console.log("Layer 3: Anti-duplication check...");
-  const selected = pickUniqueCandidate(candidates, config.recentTopics ?? []);
+  const selected = pickUniqueCandidate(withAi, config.recentTopics ?? []);
   if (!selected) {
     throw new Error("All trend candidates were duplicates (6-month memory)");
   }
 
   console.log("Selected topic:", selected.topic);
-  return { ...selected, source: "b2b-pipeline" };
+  console.log("Region focus:", selected.region_focus || "delhi-ncr");
+  return {
+    ...selected,
+    keywords: ensureAiInKeywords(selected.keywords),
+    region_focus: selected.region_focus || "delhi-ncr",
+    source: "b2b-pipeline",
+  };
 }
 
 function buildLinkedInPost(blog, category) {
@@ -169,11 +187,11 @@ DATE: ${date}
 
 New on the Zoradevs blog — ${blog.excerpt}
 
-B2B tech insights for Indian startups and growing businesses.
+B2B tech insights for Delhi NCR (Noida, Gurgaon) and Indian growing businesses.
 
 Link in comments 👇
 
-#B2B #IndianStartups #SoftwareDevelopment #Zoradevs #${category.replace(/\s+/g, "")}
+#B2B #DelhiNCR #Noida #AI #SoftwareDevelopment #Zoradevs #${category.replace(/\s+/g, "")}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 }
 
@@ -242,6 +260,23 @@ async function main() {
     topicEntry = await fetchKeywordEntry(daySlot);
   }
 
+  // Merge API recent topics + local log for stronger no-repeat guarantee.
+  const localRecent = (log.published || [])
+    .filter((p) => p.status === "success")
+    .map((p) => ({
+      title: p.title,
+      topicKey: slugify(p.keyword || p.title || ""),
+      keywords: p.keywords || [p.keyword].filter(Boolean),
+      keyword: p.keyword,
+    }));
+  const allRecent = [...(config.recentTopics ?? []), ...localRecent];
+  if (isDuplicate(topicEntry, allRecent)) {
+    console.error("Resolved topic is a duplicate of a previously published blog. Aborting.");
+    process.exit(1);
+  }
+
+  topicEntry.keywords = ensureAiInKeywords(topicEntry.keywords);
+
   const brief = {
     service: topicEntry.service ?? topicEntry.category,
     topic: topicEntry.topic || topicEntry.title_angle,
@@ -249,7 +284,10 @@ async function main() {
     secondaryKeywords: topicEntry.keywords.slice(1),
     category: topicEntry.category,
     titleAngle: topicEntry.title_angle ?? topicEntry.topic,
-    indiaAngle: topicEntry.india_angle ?? "Indian B2B market",
+    indiaAngle:
+      topicEntry.india_angle ??
+      "Delhi NCR (Noida, Gurgaon, Delhi) first; Pan-India as secondary",
+    regionFocus: topicEntry.region_focus || "delhi-ncr",
   };
 
   const source = topicEntry.source ?? "b2b-pipeline";
@@ -259,6 +297,10 @@ async function main() {
   try {
     blog = await writeB2BBlog(brief);
     if (!blog.slug) blog.slug = slugify(blog.title);
+    blog.keywords = ensureAiInKeywords(blog.keywords ?? topicEntry.keywords);
+    if (!blog.tags?.some((t) => /\bai\b|artificial intelligence/i.test(t))) {
+      blog.tags = ensureAiInKeywords([...(blog.tags || []), "AI"]).slice(0, 5);
+    }
   } catch (err) {
     console.error("Groq writer failed:", err.message);
     if (err.status === 429) {
@@ -271,13 +313,24 @@ async function main() {
 
   const faqSchema = buildFaqSchema(blog.faqs);
 
-  console.log("Fetching cover image from Unsplash...");
+  const usedFromLog = (log.published || [])
+    .map((p) => p.unsplashId)
+    .filter(Boolean);
+  const excludeIds = [...loadUsedUnsplashIds(usedFromLog)];
+
+  console.log("Fetching cover image from Unsplash (keyword-based, no repeats)...");
   const cover = await fetchBlogCoverImage({
+    keywords: blog.keywords ?? topicEntry.keywords,
     keyword: topicEntry.keywords[0],
     category: topicEntry.category,
     service: topicEntry.service,
     title: blog.title,
+    excludeIds,
   });
+
+  if (cover.unsplashId) {
+    saveUsedUnsplashId(cover.unsplashId);
+  }
 
   const publishPayload = {
     title: blog.title,
@@ -321,9 +374,11 @@ async function main() {
       date,
       keyword: topicEntry.keywords[0],
       title: blog.title,
+      keywords: blog.keywords ?? topicEntry.keywords,
       url: successLog.url,
       status: "success",
       source,
+      unsplashId: cover.unsplashId || null,
     });
     writeJson("published_log.json", log);
     await logPublishToApi(successLog);
