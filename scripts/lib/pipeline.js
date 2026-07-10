@@ -7,8 +7,10 @@ import { callGroq, parseJson, sleep } from "./groq.js";
 const BLOCKED = ["politics", "crypto hype", "celebrity gossip", "adult content", "US-only consumer tech"];
 const MIN_WORDS = 2000;
 const MAX_WORDS = 2800;
-const PART_MAX_TOKENS = Number(process.env.GROQ_PART_MAX_TOKENS ?? 4500);
-const META_MAX_TOKENS = Number(process.env.GROQ_META_MAX_TOKENS ?? 3500);
+const PART_MAX_TOKENS = Number(process.env.GROQ_PART_MAX_TOKENS ?? 3200);
+const META_MAX_TOKENS = Number(process.env.GROQ_META_MAX_TOKENS ?? 2200);
+/** Pause between large Groq writes so TPM (~12k/min) can refill. */
+const PART_DELAY_MS = Number(process.env.GROQ_PART_DELAY_SEC ?? 25) * 1000;
 
 /** Exact closing paragraph required on every published blog (SEO roadmap). */
 export const ZORADEVS_CLOSING_PARAGRAPH =
@@ -344,7 +346,7 @@ IMPORTANT: Return ONLY markdown body text. Do NOT wrap in JSON. Do NOT use code 
 
       const text = await callGroq(prompt, 0.55, {
         maxTokens: PART_MAX_TOKENS,
-        maxRetries: 6,
+        maxRetries: 4,
       });
 
       const content = extractContentFromResponse(text);
@@ -359,7 +361,7 @@ IMPORTANT: Return ONLY markdown body text. Do NOT wrap in JSON. Do NOT use code 
     } catch (err) {
       lastError = err;
       console.warn(`Part ${part} attempt ${attempt} failed:`, err.message);
-      if (attempt < 3) await sleep(15000);
+      if (attempt < 3) await sleep(Math.min(PART_DELAY_MS, 20000));
     }
   }
 
@@ -372,7 +374,7 @@ async function expandIfNeeded(brief, title, content) {
 
   const needed = MIN_WORDS - words + 150;
   console.log(`Expanding blog by ~${needed} words (currently ${words})...`);
-  await sleep(15000);
+  await sleep(PART_DELAY_MS);
 
   const text = await callGroq(
     `Expand this Zoradevs B2B blog. Keep existing sections. Add deeper detail under existing H2/H3 headings and/or add:
@@ -388,9 +390,9 @@ TOPIC: ${brief.topic}
 PRIMARY KEYWORD: ${brief.primaryKeyword}
 
 CURRENT CONTENT:
-${content.slice(0, 9000)}`,
+${content.slice(0, 7000)}`,
     0.5,
-    { maxTokens: PART_MAX_TOKENS, maxRetries: 5 }
+    { maxTokens: PART_MAX_TOKENS, maxRetries: 4 }
   );
 
   const expanded = extractContentFromResponse(text);
@@ -403,7 +405,7 @@ ${content.slice(0, 9000)}`,
 export async function writeBlogMetadata(brief) {
   const metaText = await callGroq(buildMetaPrompt(brief), 0.45, {
     maxTokens: META_MAX_TOKENS,
-    maxRetries: 6,
+    maxRetries: 4,
   });
   const meta = parseJson(metaText);
   if (!meta.title || !meta.faqs?.length) {
@@ -419,16 +421,16 @@ export async function writeBlogMetadata(brief) {
  */
 export async function writeB2BBlogBody(brief, meta) {
   const title = meta.title;
-  console.log("Writer pass: content part 1/3...");
-  await sleep(12000);
+  console.log(`Writer pass: content part 1/3 (waiting ${PART_DELAY_MS / 1000}s for TPM)...`);
+  await sleep(PART_DELAY_MS);
   const part1 = await writeContentPart(brief, title, 1);
 
-  console.log("Writer pass: content part 2/3...");
-  await sleep(12000);
+  console.log(`Writer pass: content part 2/3 (waiting ${PART_DELAY_MS / 1000}s for TPM)...`);
+  await sleep(PART_DELAY_MS);
   const part2 = await writeContentPart(brief, title, 2);
 
-  console.log("Writer pass: content part 3/3...");
-  await sleep(12000);
+  console.log(`Writer pass: content part 3/3 (waiting ${PART_DELAY_MS / 1000}s for TPM)...`);
+  await sleep(PART_DELAY_MS);
   const part3 = await writeContentPart(brief, title, 3);
 
   let content = [part1, part2, part3].join("\n\n").trim();
@@ -443,7 +445,7 @@ export async function writeB2BBlogBody(brief, meta) {
 
   if (words < MIN_WORDS) {
     console.log("Running second expand pass...");
-    await sleep(15000);
+    await sleep(PART_DELAY_MS);
     content = await expandIfNeeded(brief, title, content);
     words = countWords(content);
     console.log(`Second expand word count: ${words}`);
@@ -477,8 +479,8 @@ export async function writeB2BBlogBody(brief, meta) {
 }
 
 export async function writeB2BBlog(brief, { maxTitleRetries = 3 } = {}) {
-  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 40);
-  console.log(`Waiting ${delaySec}s before Groq writer (avoids 429 rate limit)...`);
+  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 15);
+  console.log(`Waiting ${delaySec}s before Groq writer (TPM cooldown after topic pick)...`);
   await sleep(delaySec * 1000);
 
   let meta = null;
@@ -493,7 +495,7 @@ export async function writeB2BBlog(brief, { maxTitleRetries = 3 } = {}) {
       `Title missing "AI" (attempt ${attempt}): "${meta.title}" — regenerating metadata...`
     );
     meta = null;
-    if (attempt < maxTitleRetries) await sleep(10000);
+    if (attempt < maxTitleRetries) await sleep(PART_DELAY_MS);
   }
 
   if (!meta || !titleContainsAi(meta.title)) {
