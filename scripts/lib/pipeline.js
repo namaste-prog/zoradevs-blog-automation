@@ -181,7 +181,7 @@ export async function writeB2BBlog(brief) {
           : `${buildBlogWriterPrompt(brief)}\n\nIMPORTANT: Previous response was invalid or too short. Return STRICT valid JSON with at least ${MIN_WORDS} words in "content". Use \\n for line breaks inside strings. Use ## and ### for headings only (not raw # in paragraph text).`;
 
       const text = await callGroq(prompt, 0.55, {
-        maxTokens: 8192,
+        maxTokens: 16000,
         maxRetries: 6,
       });
       const blog = parseJson(text);
@@ -192,6 +192,14 @@ export async function writeB2BBlog(brief) {
       console.log(`Blog word count: ${words}`);
       if (words < MIN_WORDS && attempt < 2) {
         throw new Error(`Blog too short (${words} words, need ${MIN_WORDS}+)`);
+      }
+      // Final attempt: accept 1800+ so the daily publish still goes out.
+      if (words < MIN_WORDS && words >= 1800) {
+        console.warn(`Accepting ${words} words on final attempt (target ${MIN_WORDS}+)`);
+        return blog;
+      }
+      if (words < 1800) {
+        throw new Error(`Blog too short (${words} words, need at least 1800)`);
       }
       if (words > MAX_WORDS + 200) {
         console.warn(`Blog is ${words} words (target ${MIN_WORDS}-${MAX_WORDS})`);
