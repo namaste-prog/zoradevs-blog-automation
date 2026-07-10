@@ -213,18 +213,71 @@ export async function filterTrendsWithGroq(ctx) {
   return ranked;
 }
 
-async function writeContentPart(brief, title, part) {
-  const text = await callGroq(buildPartPrompt(brief, title, part), 0.55, {
-    maxTokens: PART_MAX_TOKENS,
-    maxRetries: 6,
-  });
-  const parsed = parseJson(text);
-  const content = String(parsed.content || "").trim();
-  if (!content || countWords(content) < 350) {
-    throw new Error(`Part ${part} too short (${countWords(content)} words)`);
+function extractContentFromResponse(text) {
+  if (!text?.trim()) return "";
+
+  // Prefer explicit JSON content field when present.
+  try {
+    const parsed = parseJson(text);
+    const fromJson = String(
+      parsed.content ?? parsed.body ?? parsed.markdown ?? parsed.text ?? ""
+    ).trim();
+    if (fromJson) return fromJson;
+  } catch {
+    // Fall through to markdown extraction.
   }
-  console.log(`Part ${part} word count: ${countWords(content)}`);
-  return content;
+
+  const cleaned = text.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+
+  // If model returned markdown without JSON wrapper.
+  if (/^##\s/m.test(cleaned) || /^#\s/m.test(cleaned)) {
+    return cleaned.replace(/^\{[\s\S]*?"content"\s*:\s*"/, "").replace(/"\s*\}$/, "");
+  }
+
+  // Last resort: strip JSON braces if content leaked as broken JSON string.
+  const contentMatch = cleaned.match(/"content"\s*:\s*"([\s\S]*)"\s*[,}]/);
+  if (contentMatch?.[1]) {
+    return contentMatch[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').trim();
+  }
+
+  return cleaned;
+}
+
+async function writeContentPart(brief, title, part) {
+  const minWords = 300;
+  let lastError;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const useMarkdownOnly = attempt >= 2;
+      const prompt = useMarkdownOnly
+        ? `${buildPartPrompt(brief, title, part)}
+
+IMPORTANT: Return ONLY markdown body text. Do NOT wrap in JSON. Do NOT use code fences. Start directly with ## heading.`
+        : buildPartPrompt(brief, title, part);
+
+      const text = await callGroq(prompt, 0.55, {
+        maxTokens: PART_MAX_TOKENS,
+        maxRetries: 6,
+      });
+
+      const content = extractContentFromResponse(text);
+      const words = countWords(content);
+
+      if (!content || words < minWords) {
+        throw new Error(`Part ${part} too short (${words} words)`);
+      }
+
+      console.log(`Part ${part} word count: ${words}${useMarkdownOnly ? " (markdown mode)" : ""}`);
+      return content;
+    } catch (err) {
+      lastError = err;
+      console.warn(`Part ${part} attempt ${attempt} failed:`, err.message);
+      if (attempt < 3) await sleep(15000);
+    }
+  }
+
+  throw lastError ?? new Error(`Part ${part} failed after retries`);
 }
 
 async function expandIfNeeded(brief, title, content) {
@@ -240,7 +293,7 @@ async function expandIfNeeded(brief, title, content) {
 ## Real-World Use Cases in Delhi NCR
 ## Budget and Timeline Considerations
 
-Target: add about ${needed} words. Return JSON only: { "content": "full expanded markdown with \\n" }
+Target: add about ${needed} words. Return ONLY the full expanded markdown body (no JSON, no code fences).
 
 TITLE: ${title}
 TOPIC: ${brief.topic}
@@ -252,9 +305,8 @@ ${content.slice(0, 9000)}`,
     { maxTokens: PART_MAX_TOKENS, maxRetries: 5 }
   );
 
-  const parsed = parseJson(text);
-  const expanded = String(parsed.content || "").trim();
-  return expanded.length > content.length ? expanded : content;
+  const expanded = extractContentFromResponse(text);
+  return countWords(expanded) > countWords(content) ? expanded : content;
 }
 
 export async function writeB2BBlog(brief) {
@@ -295,8 +347,17 @@ export async function writeB2BBlog(brief) {
     console.log(`Expanded blog word count: ${words}`);
   }
 
-  if (words < 1800) {
-    throw new Error(`Blog too short after multi-part write (${words} words, need at least 1800)`);
+  // Second expand pass if still short.
+  if (words < MIN_WORDS) {
+    console.log("Running second expand pass...");
+    await sleep(15000);
+    content = await expandIfNeeded(brief, title, content);
+    words = countWords(content);
+    console.log(`Second expand word count: ${words}`);
+  }
+
+  if (words < 1500) {
+    throw new Error(`Blog too short after multi-part write (${words} words, need at least 1500)`);
   }
   if (words < MIN_WORDS) {
     console.warn(`Accepting ${words} words (target ${MIN_WORDS}+) after multi-part + expand`);
