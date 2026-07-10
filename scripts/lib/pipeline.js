@@ -4,8 +4,8 @@
 import { callGroq, parseJson, sleep } from "./groq.js";
 
 const BLOCKED = ["politics", "crypto hype", "celebrity gossip", "adult content", "US-only consumer tech"];
-const MIN_WORDS = 1500;
-const MAX_WORDS = 1800;
+const MIN_WORDS = 2000;
+const MAX_WORDS = 2600;
 
 function countWords(text) {
   return String(text || "").split(/\s+/).filter(Boolean).length;
@@ -107,7 +107,8 @@ REGION FOCUS: ${regionFocus}
 ${regionInstruction}
 
 Requirements:
-- 1500-1800 words in "content" (strict minimum 1500 words)
+- 2000-2600 words in "content" (strict minimum 2000 words — aim for more depth, not filler)
+- Cover: intro, market context (Delhi NCR / India), problem, solution approach, implementation steps, AI angle, ROI/business impact, common mistakes, conclusion
 - Use markdown headings: ## for main sections (H2), ### for subsections (H3) — never show raw # symbols as plain text
 - Use bullet lists with "- " prefix where helpful
 - Strong B2B tone — practical, Delhi NCR / India-market specific
