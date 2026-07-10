@@ -1,30 +1,26 @@
 /**
- * Dynamic competitor discovery — Google CSE + static India fallback.
- * Clutch often returns 403 from GitHub Actions IPs (expected).
+ * Dynamic competitor discovery — Google Custom Search only.
+ * Returns up to 3 live domains. No hardcoded competitor list.
  */
 import axios from "axios";
 
 const GOOGLE_CSE_KEY = process.env.GOOGLE_CSE_API_KEY;
 const GOOGLE_CSE_CX = process.env.GOOGLE_CSE_CX;
-
-/** Used when CSE + Clutch both fail — still gives competitor scrape targets. */
-const FALLBACK_INDIAN_COMPETITORS = [
-  { name: "Appinventiv", domain: "https://appinventiv.com", source: "fallback-india" },
-  { name: "ValueCoders", domain: "https://www.valuecoders.com", source: "fallback-india" },
-  { name: "Radixweb", domain: "https://radixweb.com", source: "fallback-india" },
-];
+const MAX_COMPETITORS = 3;
 
 function extractDomain(url) {
   try {
-    const host = new URL(url).hostname.replace(/^www\./, "");
-    return host;
+    return new URL(url).hostname.replace(/^www\./, "");
   } catch {
     return null;
   }
 }
 
 async function googleCustomSearch(query, num = 5) {
-  if (!GOOGLE_CSE_KEY || !GOOGLE_CSE_CX) return [];
+  if (!GOOGLE_CSE_KEY || !GOOGLE_CSE_CX) {
+    console.warn("GOOGLE_CSE_API_KEY / GOOGLE_CSE_CX missing — competitor discovery skipped");
+    return [];
+  }
 
   try {
     const { data } = await axios.get("https://www.googleapis.com/customsearch/v1", {
@@ -71,15 +67,19 @@ export async function discoverCompetitors(config) {
       domain: `https://${domain}`,
       source: item.source,
     });
-    if (competitors.length >= 3) break;
+    if (competitors.length >= MAX_COMPETITORS) break;
   }
 
   if (competitors.length === 0) {
-    console.log(
-      "No competitors from Google CSE — using fallback Indian dev company domains (Clutch 403 is normal on CI)."
+    console.warn(
+      "No live competitors from Google CSE — continuing with ZoraDevs core services only (no hardcoded fallback)."
     );
-    return FALLBACK_INDIAN_COMPETITORS;
+    return [];
   }
 
-  return competitors;
+  console.log(
+    `Dynamic competitors (top ${competitors.length}):`,
+    competitors.map((c) => c.domain).join(", ")
+  );
+  return competitors.slice(0, MAX_COMPETITORS);
 }
