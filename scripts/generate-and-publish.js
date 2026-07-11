@@ -19,6 +19,7 @@ import {
   writeBlogMetadata,
   writeB2BBlogBody,
   titleContainsAi,
+  normalizeSeoKeywords,
 } from "./lib/pipeline.js";
 import { pickUniqueCandidate, slugify, ensureAiInKeywords, isDuplicate } from "./lib/dedup.js";
 import { buildFaqSchema } from "./lib/faq-schema.js";
@@ -429,10 +430,11 @@ async function main() {
   try {
     blog = await writeBlogWithTitleValidation(brief);
     if (!blog.slug) blog.slug = slugify(blog.title);
-    blog.keywords = ensureAiInKeywords(blog.keywords ?? topicEntry.keywords);
-    if (!blog.tags?.some((t) => /\bai\b|artificial intelligence/i.test(t))) {
-      blog.tags = ensureAiInKeywords([...(blog.tags || []), "AI"]).slice(0, 5);
-    }
+    blog.keywords = normalizeSeoKeywords(
+      blog.keywords ?? topicEntry.keywords,
+      brief
+    );
+    blog.tags = normalizeSeoKeywords(blog.tags || blog.keywords, brief);
 
     // Final safety: title must still contain AI after full write.
     if (!titleContainsAi(blog.title)) {
@@ -485,9 +487,11 @@ async function main() {
     saveUsedUnsplashId(cover.unsplashId || cover.imageId);
   }
 
-  // Append required local SEO keywords right before publish.
-  const publishKeywords = appendStaticLocalKeywords(blog.keywords ?? topicEntry.keywords);
+  // Keep the generated 5 high-quality phrases first, then append required local SEO terms.
+  const publishKeywords = appendStaticLocalKeywords(blog.keywords ?? topicEntry.keywords)
+    .filter((k) => String(k).trim().split(/\s+/).length >= 2);
   blog.keywords = publishKeywords;
+  console.log(`Publish keywords (${publishKeywords.length}): ${publishKeywords.join(" | ")}`);
 
   // Auto alt text = first keyword in the (post-append) keywords array.
   const imageAlt = publishKeywords[0] || "AI development company Noida";
