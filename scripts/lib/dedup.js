@@ -80,22 +80,39 @@ export function pickUniqueCandidate(candidates, recentTopics) {
   return null;
 }
 
-/** Ensure every keyword set includes AI (trending requirement). */
+/** Ensure every keyword set includes AI inside multi-word phrases (never single-word "AI"). */
 export function ensureAiInKeywords(keywords = []) {
-  const cleaned = keywords.map((k) => String(k || "").trim()).filter(Boolean);
-  const hasAi = cleaned.some((k) => /\bai\b|artificial intelligence|machine learning|\bml\b/i.test(k));
+  const cleaned = keywords
+    .map((k) => String(k || "").trim().replace(/\s+/g, " "))
+    .filter((k) => k && k.split(/\s+/).length >= 2);
+
+  const hasAi = cleaned.some((k) =>
+    /\bai\b|artificial intelligence|machine learning|\bml\b/i.test(k)
+  );
 
   if (!hasAi) {
     if (cleaned[0]) {
-      cleaned[0] = `${cleaned[0]} AI`.replace(/\s+/g, " ").trim();
+      cleaned[0] = /\bai\b/i.test(cleaned[0])
+        ? cleaned[0]
+        : `AI ${cleaned[0]}`.replace(/\s+/g, " ").trim();
     } else {
       cleaned.unshift("AI software development Delhi NCR");
     }
-    if (cleaned.length < 5) {
-      cleaned.push("AI automation for businesses");
+  }
+
+  const fallbacks = [
+    "AI automation for businesses",
+    "B2B software scale India",
+    "hire AI developers Noida",
+    "custom web development Delhi NCR",
+    "AI product engineering ROI",
+  ];
+  for (const fb of fallbacks) {
+    if (cleaned.length >= 5) break;
+    if (!cleaned.some((k) => k.toLowerCase() === fb.toLowerCase())) {
+      cleaned.push(fb);
     }
   }
 
-  while (cleaned.length < 5) cleaned.push("AI technology India");
   return cleaned.slice(0, 5);
 }

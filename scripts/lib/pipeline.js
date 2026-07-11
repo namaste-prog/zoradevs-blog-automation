@@ -116,9 +116,11 @@ TITLE / TOPIC RULES (critical):
 - DO NOT use rigid SEO formulas like "[Service] + AI + in [City] + [Year]"
 
 KEYWORDS / METADATA RULES (geo lives HERE only):
-- EVERY keywords array MUST include AI AND local/business-intent SEO terms
-- Put location keywords ONLY in the keywords array (e.g. "AI development company Noida", "software development Delhi NCR", "IT company Noida")
-- Also include business-intent phrases (founders, ROI, software scale, hire developers) — natural, not spammy
+- Return EXACTLY 5 keywords — no more, no less
+- EVERY keyword MUST be a multi-word phrase (2–4 words minimum). Ban single words like "AI", "Development", "Noida", "Growth", "E-commerce"
+- Keywords must be high-intent B2B phrases deeply tied to the candidate topic (e.g. "AI e-commerce growth strategies", "retail customer experience automation", "B2B web development Delhi NCR")
+- At least one phrase must include AI as part of a longer phrase (never alone)
+- Put location terms only inside multi-word phrases when relevant
 - Never repeat or closely rephrase any topic from the 6-month list
 - Derive topics ONLY from the core services list (and industry verticals)
 
@@ -133,7 +135,7 @@ Return JSON only:
       "topic": "natural human title angle with AI, NO location, NO year",
       "service": "exact service title from list",
       "category": "blog category",
-      "keywords": ["AI + business intent", "local SEO term e.g. Noida", "kw3", "kw4", "kw5"],
+      "keywords": ["AI e-commerce growth strategies", "retail customer experience automation", "B2B software scale India", "hire AI developers Noida", "custom web app ROI"],
       "topic_key": "url-slug-dedup-key",
       "title_angle": "natural professional title direction (AI organic, no geo, no year)",
       "india_angle": "why Indian / Delhi NCR founders care (for body context only — not for the title)",
@@ -157,9 +159,14 @@ STRICT TITLE RULES:
 - DO NOT put a year in the title (no 2026, etc.)
 - DO NOT use formulaic SEO titles like "X AI in Noida 2026"
 
-KEYWORDS / TAGS (geo belongs HERE only):
-- Keywords must be business-intent (founders, ROI, software scale) — not spammy
-- Include local SEO terms in keywords/tags only (Noida, Delhi NCR, etc.) — NEVER in title
+KEYWORDS (mandatory B2B SEO rules):
+- Return EXACTLY 5 keywords/phrases — no more, no less
+- EVERY keyword MUST be a multi-word phrase (at least 2–4 words). Completely ban single-word keywords like "AI", "Development", "Noida", "Growth", "E-commerce"
+- Keywords must be highly specific, high-intent, and directly tied to THIS blog topic/service (e.g. "AI e-commerce growth strategies", "retail customer experience automation", "B2B web development Delhi NCR")
+- At least one phrase must include AI inside a longer phrase (never the single word "AI")
+- Location terms (Noida / Delhi NCR) only inside multi-word phrases — NEVER in the title
+- Output keywords strictly as a JSON array of 5 strings
+- Tags: also prefer multi-word phrases; include AI inside a phrase, not alone
 - meta_title / meta_description may mention Zoradevs; keep them readable, not stuffed
 
 FAQs (critical for SEO):
@@ -175,8 +182,8 @@ Return ONLY metadata JSON (no full article body yet). CRITICAL: escape newlines 
   "excerpt": "max 300 chars",
   "meta_title": "50-60 chars including Zoradevs",
   "meta_description": "150-160 chars",
-  "keywords": ["AI keyword", "local SEO e.g. Noida", "business intent", "...", "..."],
-  "tags": ["5 tags", "include AI", "...", "...", "..."],
+  "keywords": ["AI e-commerce growth strategies", "retail customer experience automation", "B2B web development Delhi NCR", "software scale for founders", "hire AI developers Noida"],
+  "tags": ["AI product engineering", "e-commerce automation", "B2B software delivery", "founder growth playbook", "Delhi NCR tech teams"],
   "faqs": [
     { "question": "FAQ 1?", "answer": "..." },
     { "question": "FAQ 2?", "answer": "..." },
@@ -681,6 +688,124 @@ function normalizeFaqs(faqs) {
     .slice(0, TARGET_FAQ_COUNT);
 }
 
+function wordCountPhrase(phrase) {
+  return String(phrase || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+function isValidSeoKeyword(phrase) {
+  const cleaned = String(phrase || "").trim().replace(/\s+/g, " ");
+  if (!cleaned) return false;
+  // Ban single-word keywords entirely.
+  if (wordCountPhrase(cleaned) < 2) return false;
+  // Prefer concise commercial phrases (allow up to 6 words).
+  if (wordCountPhrase(cleaned) > 6) return false;
+  return true;
+}
+
+/**
+ * Enforce exactly 5 multi-word, high-intent SEO keyword phrases.
+ */
+export function normalizeSeoKeywords(keywords = [], brief = {}) {
+  const seen = new Set();
+  const out = [];
+
+  // Accept array or comma-separated string from model.
+  const rawList = Array.isArray(keywords)
+    ? keywords
+    : String(keywords || "")
+        .split(",")
+        .map((k) => k.trim());
+
+  for (const raw of rawList) {
+    const cleaned = String(raw || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .replace(/^[,;]+|[,;]+$/g, "");
+    if (!isValidSeoKeyword(cleaned)) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+    if (out.length === 5) break;
+  }
+
+  const topicSeed = String(brief.topic || brief.titleAngle || brief.service || "AI software")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const serviceSeed = String(brief.service || brief.category || "software development")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const fallbacks = [
+    `AI ${serviceSeed} strategies`.replace(/\s+/g, " ").trim(),
+    `${topicSeed} for founders`.replace(/\s+/g, " ").trim().slice(0, 60),
+    "B2B software scale India",
+    "retail customer experience automation",
+    "hire AI developers Noida",
+    "custom web development Delhi NCR",
+    "AI product engineering ROI",
+  ].filter(isValidSeoKeyword);
+
+  for (const fb of fallbacks) {
+    if (out.length >= 5) break;
+    const key = fb.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(fb);
+  }
+
+  // Guarantee AI appears inside at least one multi-word phrase (never alone).
+  const hasAiPhrase = out.some((k) => /\bai\b|artificial intelligence|machine learning/i.test(k));
+  if (!hasAiPhrase && out.length) {
+    out[0] = /\bai\b/i.test(out[0]) ? out[0] : `AI ${out[0]}`.replace(/\s+/g, " ").trim();
+  }
+
+  return out.slice(0, 5);
+}
+
+async function ensureQualityKeywords(brief, title, existingKeywords = []) {
+  let keywords = normalizeSeoKeywords(existingKeywords, brief);
+  if (keywords.length === 5 && keywords.every(isValidSeoKeyword)) {
+    return keywords;
+  }
+
+  console.warn(
+    `Keyword quality check failed (${keywords.length}/5 multi-word) — regenerating SEO keywords...`
+  );
+
+  const text = await callGroq(
+    `Generate EXACTLY 5 high-intent B2B SEO keyword phrases for this ZoraDevs blog.
+
+TITLE: ${title}
+TOPIC: ${brief.topic}
+SERVICE: ${brief.service}
+PRIMARY CONTEXT: ${brief.primaryKeyword || ""}
+
+MANDATORY RULES:
+1. Exactly 5 phrases — no more, no less
+2. Every phrase MUST be multi-word (2–4 words minimum). Ban single words like "AI", "Development", "Noida", "Growth"
+3. Deeply relevant to this blog topic — high commercial intent
+4. At least one phrase includes AI as part of a longer phrase
+5. Return JSON only: { "keywords": ["phrase one", "phrase two", "phrase three", "phrase four", "phrase five"] }
+
+Good examples: "AI e-commerce growth strategies", "retail customer experience automation", "B2B web development Delhi NCR"`,
+    0.3,
+    { maxTokens: 400, maxRetries: 3 }
+  );
+
+  const parsed = parseJson(text);
+  keywords = normalizeSeoKeywords(parsed.keywords || [], brief);
+  if (keywords.length !== 5) {
+    throw new Error(`Keyword generation returned ${keywords.length} valid phrases (need exactly 5)`);
+  }
+  return keywords;
+}
+
 async function ensureTenFaqs(brief, title, existingFaqs = []) {
   let faqs = normalizeFaqs(existingFaqs);
   if (faqs.length >= MIN_FAQ_COUNT) {
@@ -731,7 +856,10 @@ export async function writeBlogMetadata(brief) {
   }
 
   meta.faqs = await ensureTenFaqs(brief, meta.title, meta.faqs);
+  meta.keywords = await ensureQualityKeywords(brief, meta.title, meta.keywords);
+  meta.tags = normalizeSeoKeywords(meta.tags || meta.keywords, brief);
   console.log(`Metadata FAQs ready: ${meta.faqs.length}`);
+  console.log(`Metadata keywords (exactly 5 multi-word): ${meta.keywords.join(" | ")}`);
   return meta;
 }
 
@@ -794,6 +922,8 @@ export async function writeB2BBlogBody(brief, meta) {
     service: brief.service,
   });
 
+  const keywords = normalizeSeoKeywords(meta.keywords, brief);
+
   return {
     title: meta.title,
     slug: meta.slug,
@@ -801,8 +931,8 @@ export async function writeB2BBlogBody(brief, meta) {
     content,
     meta_title: meta.meta_title,
     meta_description: meta.meta_description,
-    keywords: meta.keywords,
-    tags: meta.tags,
+    keywords,
+    tags: normalizeSeoKeywords(meta.tags || keywords, brief),
     faqs: meta.faqs,
     imageQuery,
   };
