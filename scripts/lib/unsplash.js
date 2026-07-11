@@ -54,6 +54,20 @@ function isLandscape(width, height) {
 }
 
 function normalizeImageQuery(imageQuery) {
+  const ABSTRACT = new Set([
+    "concept",
+    "abstract",
+    "background",
+    "futuristic",
+    "matrix",
+    "innovation",
+    "transformation",
+    "neon",
+    "glow",
+    "hologram",
+    "metaverse",
+  ]);
+
   return String(imageQuery || "")
     .replace(/[^\w\s]/g, " ")
     .replace(/\s+/g, " ")
@@ -61,7 +75,8 @@ function normalizeImageQuery(imageQuery) {
     .toLowerCase()
     .split(" ")
     .filter(Boolean)
-    .slice(0, 5)
+    .filter((w) => !ABSTRACT.has(w))
+    .slice(0, 8)
     .join(" ");
 }
 
@@ -243,7 +258,7 @@ export async function fetchBlogCoverImage({
   const query =
     normalizeImageQuery(imageQuery) ||
     normalizeImageQuery(keywords[0] || keyword) ||
-    "software developers working laptops office";
+    "retail analytics dashboard team meeting";
 
   if (!UNSPLASH_KEY && !PEXELS_KEY) {
     console.warn("No UNSPLASH_ACCESS_KEY or PEXELS_API_KEY — using category fallback image");
@@ -251,7 +266,7 @@ export async function fetchBlogCoverImage({
   }
 
   const usedIds = loadUsedUnsplashIds(excludeIds);
-  console.log(`Cover imageQuery (literal scene only): "${query}"`);
+  console.log(`Cover imageQuery (topic-specific): "${query}"`);
   console.log(`Excluding ${usedIds.size} previously used image IDs`);
 
   // Unsplash first

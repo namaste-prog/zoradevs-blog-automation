@@ -466,7 +466,12 @@ async function main() {
     .filter(Boolean);
   const excludeIds = [...loadUsedUnsplashIds(usedFromLog)];
 
-  console.log("Fetching landscape cover (imageQuery only — Unsplash then Pexels)...");
+  console.log("Fetching landscape cover from dynamic imageQuery (Unsplash then Pexels)...");
+  if (!blog.imageQuery) {
+    console.warn("Missing imageQuery — cover search may be weak");
+  } else {
+    console.log("imageQuery:", blog.imageQuery);
+  }
   const cover = await fetchBlogCoverImage({
     imageQuery: blog.imageQuery,
     keywords: blog.keywords ?? topicEntry.keywords,
@@ -490,7 +495,11 @@ async function main() {
   const author = pickRandomAuthor();
   console.log("Author:", author);
   console.log("Image alt:", imageAlt);
-  console.log("imageQuery:", blog.imageQuery);
+  console.log("Final imageQuery:", blog.imageQuery);
+  console.log(
+    "ZoraDevs links in content:",
+    (blog.content.match(/https?:\/\/(?:www\.)?zoradevs\.com/gi) || []).length
+  );
 
   const publishPayload = {
     title: blog.title,
