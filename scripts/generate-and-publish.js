@@ -19,7 +19,7 @@ import {
   writeBlogMetadata,
   writeB2BBlogBody,
   titleContainsAi,
-  normalizeSeoKeywords,
+  ensureQualityKeywords,
 } from "./lib/pipeline.js";
 import { pickUniqueCandidate, slugify, ensureAiInKeywords, isDuplicate } from "./lib/dedup.js";
 import { buildFaqSchema } from "./lib/faq-schema.js";
@@ -38,14 +38,6 @@ const BLOG_AUTOMATION_URL =
   process.env.BLOG_AUTOMATION_URL ??
   BLOG_API_URL.replace(/\/api\/blogs\/?$/, "/api/automation/config");
 
-/** Static local SEO keywords appended to every publish payload. */
-const STATIC_LOCAL_KEYWORDS = [
-  "AI development company Noida",
-  "software development company Noida",
-  "IT company Noida",
-  "app development Delhi NCR",
-];
-
 const TITLE_META_RETRIES = 3;
 
 const authHeaders = {
@@ -55,12 +47,27 @@ const authHeaders = {
 
 function getWeekdaySlot() {
   const d = new Date().getDay();
+  // Daily evening runs: Mon–Fri use that day; Sat/Sun fall back to Friday keywords.
   if (d >= 1 && d <= 5) return d;
-  return null;
+  return 5;
 }
 
 function todayISO() {
   return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Tomorrow 08:00 AM IST as UTC ISO string.
+ * IST = UTC+05:30 → 08:00 IST = 02:30 UTC.
+ */
+function tomorrowEightAmIstIso() {
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const istNow = new Date(Date.now() + IST_OFFSET_MS);
+  const y = istNow.getUTCFullYear();
+  const m = istNow.getUTCMonth();
+  const d = istNow.getUTCDate();
+  // Calendar tomorrow in IST, at 08:00 IST (= 02:30 UTC)
+  return new Date(Date.UTC(y, m, d + 1, 2, 30, 0, 0)).toISOString();
 }
 
 function readJson(file) {
@@ -90,21 +97,6 @@ function pickRandomAuthor() {
 
 function forcePublishEnabled() {
   return String(process.env.FORCE_PUBLISH || "").toLowerCase() === "true";
-}
-
-/** Deduped merge: existing keywords + required local SEO terms. */
-function appendStaticLocalKeywords(keywords = []) {
-  const merged = [];
-  const seen = new Set();
-  for (const kw of [...keywords, ...STATIC_LOCAL_KEYWORDS]) {
-    const cleaned = String(kw || "").trim();
-    if (!cleaned) continue;
-    const key = cleaned.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(cleaned);
-  }
-  return merged;
 }
 
 /** If topic collides with history, rewrite into a unique natural AI angle (geo stays in keywords). */
@@ -320,10 +312,7 @@ async function main() {
   }
 
   const daySlot = getWeekdaySlot();
-  if (daySlot === null) {
-    console.log("Weekend — no blog scheduled.");
-    process.exit(0);
-  }
+  // Daily generation (evening IST) — no weekend skip.
 
   const date = todayISO();
   let config = {
@@ -354,12 +343,12 @@ async function main() {
   }
 
   const log = readJson("published_log.json");
-  if (log.published?.find((p) => p.date === date && p.status === "success")) {
+  if (log.published?.find((p) => p.date === date && (p.status === "success" || p.status === "draft" || p.status === "scheduled"))) {
     if (forcePublishEnabled()) {
       console.warn("FORCE_PUBLISH=true — ignoring local published_log for today.");
     } else {
-      console.log("Already published today (local log).");
-      console.log("Tip: re-run workflow with force_publish=true to publish another blog today.");
+      console.log("Already generated a draft/post today (local log).");
+      console.log("Tip: re-run workflow with force_publish=true to create another draft today.");
       process.exit(0);
     }
   }
@@ -430,11 +419,18 @@ async function main() {
   try {
     blog = await writeBlogWithTitleValidation(brief);
     if (!blog.slug) blog.slug = slugify(blog.title);
-    blog.keywords = normalizeSeoKeywords(
+
+    // Final keyword pass: exactly 5 phrases tied to this blog (local Noida OK in keywords only).
+    blog.keywords = await ensureQualityKeywords(
+      { ...brief, title: blog.title, excerpt: blog.excerpt },
+      blog.title,
       blog.keywords ?? topicEntry.keywords,
-      brief
+      blog.excerpt
     );
-    blog.tags = normalizeSeoKeywords(blog.tags || blog.keywords, brief);
+
+    if (!Array.isArray(blog.tags) || !blog.tags.length) {
+      blog.tags = blog.keywords.slice(0, 5);
+    }
 
     // Final safety: title must still contain AI after full write.
     if (!titleContainsAi(blog.title)) {
@@ -487,14 +483,11 @@ async function main() {
     saveUsedUnsplashId(cover.unsplashId || cover.imageId);
   }
 
-  // Keep the generated 5 high-quality phrases first, then append required local SEO terms.
-  const publishKeywords = appendStaticLocalKeywords(blog.keywords ?? topicEntry.keywords)
-    .filter((k) => String(k).trim().split(/\s+/).length >= 2);
+  const publishKeywords = blog.keywords.slice(0, 5);
   blog.keywords = publishKeywords;
-  console.log(`Publish keywords (${publishKeywords.length}): ${publishKeywords.join(" | ")}`);
+  console.log(`Publish keywords (exactly ${publishKeywords.length}): ${publishKeywords.join(" | ")}`);
 
-  // Auto alt text = first keyword in the (post-append) keywords array.
-  const imageAlt = publishKeywords[0] || "AI development company Noida";
+  const imageAlt = publishKeywords[0] || blog.title;
 
   const author = pickRandomAuthor();
   console.log("Author:", author);
@@ -504,6 +497,9 @@ async function main() {
     "ZoraDevs links in content:",
     (blog.content.match(/https?:\/\/(?:www\.)?zoradevs\.com/gi) || []).length
   );
+
+  const publishAt = tomorrowEightAmIstIso();
+  console.log(`Scheduling go-live at ${publishAt} (tomorrow 08:00 AM IST)`);
 
   const publishPayload = {
     title: blog.title,
@@ -523,14 +519,28 @@ async function main() {
     faqSchema,
     author,
     read_time: calcReadTime(blog.content),
-    published: true,
+    published: false,
+    status: "scheduled",
+    publishAt,
+    scheduledDate: publishAt,
+    source: "automation",
     service: topicEntry.service ?? "",
   };
 
   try {
-    console.log("Layer 5: Publishing to", BLOG_API_URL);
+    console.log("Layer 5: Saving SCHEDULED post to", BLOG_API_URL);
     const result = await publishBlog(publishPayload);
-    console.log("Published:", result.url);
+    const blogId = result.blog_id || result._id || result.id;
+    const adminEditUrl = blogId
+      ? `https://zoradevs.com/admin/blogs/${blogId}`
+      : `https://zoradevs.com/admin/blogs`;
+    const publicPath = result.url?.startsWith("http")
+      ? result.url
+      : `https://zoradevs.com${result.url || `/blog/${blog.slug}`}`;
+
+    console.log("Scheduled (not live yet):", publicPath);
+    console.log("Goes live:", publishAt);
+    console.log("Admin preview:", adminEditUrl);
 
     const topicKey = topicEntry.topic_key ?? slugify(topicEntry.keywords[0]);
     const successLog = {
@@ -541,8 +551,8 @@ async function main() {
       category: topicEntry.category,
       service: topicEntry.service ?? "",
       source,
-      url: result.url?.startsWith("http") ? result.url : `https://zoradevs.com${result.url}`,
-      status: "success",
+      url: adminEditUrl,
+      status: "scheduled",
     };
 
     log.published.push({
@@ -550,18 +560,20 @@ async function main() {
       keyword: publishKeywords[0],
       title: blog.title,
       keywords: publishKeywords,
-      url: successLog.url,
-      status: "success",
+      url: adminEditUrl,
+      status: "scheduled",
       source,
+      publishAt,
       unsplashId: cover.unsplashId || cover.imageId || null,
       imageQuery: blog.imageQuery || null,
+      blogId: blogId || null,
     });
     writeJson("published_log.json", log);
     await logPublishToApi(successLog);
 
     appendLinkedInPost(buildLinkedInPost(blog, topicEntry.category));
   } catch (err) {
-    console.error("Publish failed:", err.response?.data ?? err.message);
+    console.error("Schedule save failed:", err.response?.data ?? err.message);
     process.exit(1);
   }
 }

@@ -80,7 +80,7 @@ export function pickUniqueCandidate(candidates, recentTopics) {
   return null;
 }
 
-/** Ensure every keyword set includes AI inside multi-word phrases (never single-word "AI"). */
+/** Ensure topic-pick keywords include AI in a phrase; do not pad with generic SEO lists. */
 export function ensureAiInKeywords(keywords = []) {
   const cleaned = keywords
     .map((k) => String(k || "").trim().replace(/\s+/g, " "))
@@ -90,28 +90,10 @@ export function ensureAiInKeywords(keywords = []) {
     /\bai\b|artificial intelligence|machine learning|\bml\b/i.test(k)
   );
 
-  if (!hasAi) {
-    if (cleaned[0]) {
-      cleaned[0] = /\bai\b/i.test(cleaned[0])
-        ? cleaned[0]
-        : `AI ${cleaned[0]}`.replace(/\s+/g, " ").trim();
-    } else {
-      cleaned.unshift("AI software development Delhi NCR");
-    }
-  }
-
-  const fallbacks = [
-    "AI automation for businesses",
-    "B2B software scale India",
-    "hire AI developers Noida",
-    "custom web development Delhi NCR",
-    "AI product engineering ROI",
-  ];
-  for (const fb of fallbacks) {
-    if (cleaned.length >= 5) break;
-    if (!cleaned.some((k) => k.toLowerCase() === fb.toLowerCase())) {
-      cleaned.push(fb);
-    }
+  if (!hasAi && cleaned.length) {
+    cleaned[0] = /\bai\b/i.test(cleaned[0])
+      ? cleaned[0]
+      : `AI ${cleaned[0]}`.replace(/\s+/g, " ").trim();
   }
 
   return cleaned.slice(0, 5);
