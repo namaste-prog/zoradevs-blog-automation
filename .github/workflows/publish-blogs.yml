@@ -1,13 +1,13 @@
-name: Publish Daily Blog
+name: Schedule Daily Blog
 
 on:
   schedule:
-    # Mon–Fri 9:00 AM IST (3:30 AM UTC)
-    - cron: "30 3 * * 1-5"
+    # Every day 7:00 PM IST (13:30 UTC) — generates tomorrow's post (go-live 08:00 AM IST)
+    - cron: "30 13 * * *"
   workflow_dispatch:
     inputs:
       force_publish:
-        description: "Force publish even if a blog was already logged today"
+        description: "Force create another scheduled post even if one was already logged today"
         required: false
         default: "true"
         type: choice
@@ -31,7 +31,7 @@ jobs:
 
       - run: npm ci
 
-      - name: Generate and publish B2B blog
+      - name: Generate and schedule B2B blog
         run: node scripts/generate-and-publish.js
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -61,6 +61,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No log changes to commit"
           else
-            git commit -m "Auto: published blog + linkedin post [skip ci]"
+            git commit -m "Auto: scheduled blog + linkedin post [skip ci]"
             git push
           fi
