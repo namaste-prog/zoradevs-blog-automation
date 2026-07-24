@@ -52,6 +52,8 @@ jobs:
           GOOGLE_CSE_API_KEY: ${{ secrets.GOOGLE_CSE_API_KEY }}
           GOOGLE_CSE_CX: ${{ secrets.GOOGLE_CSE_CX }}
           FORCE_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_publish || 'false' }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PUBLISH_IMMEDIATELY: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
 
       - name: Commit log and LinkedIn queue
         run: |

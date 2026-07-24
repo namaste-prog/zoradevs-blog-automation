@@ -214,6 +214,13 @@ Preferred targets (pick what fits the topic):
 - [ZoraDevs Blog](https://zoradevs.com/blog)
 Do NOT dump a raw link list. Weave links into sentences naturally.`;
 
+  const formatGuide = `FORMATTING (mandatory):
+- Prefer bullet points (- item) and short numbered steps over long paragraphs
+- Keep each paragraph to 2–3 sentences maximum — never write dense walls of text
+- After a short intro sentence under a heading, switch to bullets for details, benefits, steps, and tips
+- Step-by-Step, Tech Stack, Mistakes, Checklist, and ROI sections MUST be mostly bullet lists
+- Leave clear spacing: one blank line between headings, short paragraphs, and lists`;
+
   const parts = {
     1: {
       label: "PART 1 of 3",
@@ -226,7 +233,8 @@ Do NOT dump a raw link list. Weave links into sentences naturally.`;
 
 Use natural, professional H2/H3 headings — do NOT force "Noida", "Delhi NCR", or a year into headings.
 You may mention local Indian business context in the body prose where it fits naturally. Weave AI organically. Focus on ROI and software scale.
-Include 1–2 natural ZoraDevs internal links in this part.`,
+Include 1–2 natural ZoraDevs internal links in this part.
+Under each H2 after Introduction: 1 short paragraph max, then bullet points.`,
     },
     2: {
       label: "PART 2 of 3",
@@ -238,7 +246,8 @@ Write ONLY these sections in markdown:
 ## Recommended Tech Stack and Architecture
 ## How Zoradevs Helps (${brief.service})
 
-Be detailed and actionable. Include 2–3 natural ZoraDevs service page links (markdown) in this part.`,
+Be detailed and actionable. Include 2–3 natural ZoraDevs service page links (markdown) in this part.
+Step-by-Step and Tech Stack MUST use bullet or numbered lists as the main content.`,
     },
     3: {
       label: "PART 3 of 3",
@@ -250,6 +259,7 @@ Write ONLY these sections in markdown:
 ## Checklist for Decision Makers
 ## Conclusion and Next Steps
 
+Impact, Mistakes, and Checklist MUST be bullet-heavy (pointers, not long paragraphs).
 Include at least 1 natural link to https://zoradevs.com/contact in Conclusion.
 After the Conclusion section, end the article with EXACTLY this paragraph word-for-word (no edits, no extras):
 "${ZORADEVS_CLOSING_PARAGRAPH}"
@@ -268,6 +278,8 @@ ${cfg.label} — write ${cfg.target} of markdown body only.
 
 ${cfg.sections}
 
+${formatGuide}
+
 ${linkGuide}
 
 Rules:
@@ -275,7 +287,7 @@ Rules:
 - Use ## and ### headings only
 - No FAQ section in content
 - No title/H1 at the top
-- Dense, useful B2B writing — not filler
+- Dense, scannable B2B writing — bullets first, short paragraphs second — not filler
 - HARD REQUIREMENT: this part must be at least 650 words (prefer ${cfg.target})`;
 }
 
@@ -293,8 +305,8 @@ export async function filterTrendsWithGroq(ctx) {
     }),
     0.4,
     {
-      maxTokens: 2048,
-      maxRetries: 4,
+    maxTokens: 2048,
+    maxRetries: 4,
     }
   );
   const result = parseJson(text);
@@ -647,7 +659,7 @@ Write ONLY new markdown sections to APPEND (start with ##). Target about ${neede
 Rules:
 - Return ONLY the new sections (markdown). No JSON. No code fences.
 - Do not repeat the title or earlier sections.
-- Dense, practical B2B detail. Weave AI naturally.
+- Prefer bullet points and short paragraphs (2–3 sentences max). Weave AI naturally.
 - No location/year stuffing in headings.
 
 ARTICLE TITLE: ${title}
@@ -682,8 +694,9 @@ function normalizeFaqs(faqs) {
   if (!Array.isArray(faqs)) return [];
   return faqs
     .map((f) => ({
-      question: String(f?.question || "").trim(),
-      answer: String(f?.answer || "").trim(),
+      question: String(f?.question || "").trim().slice(0, 300),
+      // Keep under website/API limits so FAQs are never dropped on publish.
+      answer: String(f?.answer || "").trim().slice(0, 1800),
     }))
     .filter((f) => f.question.length >= 5 && f.answer.length >= 10)
     .slice(0, TARGET_FAQ_COUNT);
@@ -903,7 +916,7 @@ PRIMARY KEYWORD: ${brief.primaryKeyword}
 Rules:
 - Exactly ${TARGET_FAQ_COUNT} items
 - Questions founders/CTOs would actually search
-- Answers 2–4 sentences, practical
+- Answers 2–4 sentences, practical, under 150 words each
 - Return JSON only: { "faqs": [ { "question": "...", "answer": "..." } ] }
 - Escape newlines in strings as \\n`,
     0.4,
