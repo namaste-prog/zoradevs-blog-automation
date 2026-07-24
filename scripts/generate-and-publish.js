@@ -99,6 +99,12 @@ function forcePublishEnabled() {
   return String(process.env.FORCE_PUBLISH || "").toLowerCase() === "true";
 }
 
+/** Manual GitHub runs go live immediately; cron schedules for tomorrow 08:00 IST. */
+function shouldPublishImmediately() {
+  if (String(process.env.PUBLISH_IMMEDIATELY || "").toLowerCase() === "true") return true;
+  return process.env.GITHUB_EVENT_NAME === "workflow_dispatch";
+}
+
 /** If topic collides with history, rewrite into a unique natural AI angle (geo stays in keywords). */
 function uniquifyTopicEntry(entry, allRecent) {
   if (!isDuplicate(entry, allRecent)) return entry;
@@ -452,6 +458,15 @@ async function main() {
     process.exit(1);
   }
 
+  // Sanitize FAQs so overlong answers never get dropped by the website API validator.
+  blog.faqs = (Array.isArray(blog.faqs) ? blog.faqs : [])
+    .map((f) => ({
+      question: String(f?.question || "").trim().slice(0, 300),
+      answer: String(f?.answer || "").trim().slice(0, 1800),
+    }))
+    .filter((f) => f.question.length >= 5 && f.answer.length >= 10)
+    .slice(0, 10);
+
   const faqSchema = buildFaqSchema(blog.faqs);
   if (!faqSchema?.mainEntity?.length) {
     console.error("FAQ schema missing — aborting publish (need FAQs for SEO)");
@@ -498,8 +513,16 @@ async function main() {
     (blog.content.match(/https?:\/\/(?:www\.)?zoradevs\.com/gi) || []).length
   );
 
-  const publishAt = tomorrowEightAmIstIso();
-  console.log(`Scheduling go-live at ${publishAt} (tomorrow 08:00 AM IST)`);
+  const publishImmediately = shouldPublishImmediately();
+  const publishAt = publishImmediately
+    ? new Date().toISOString()
+    : tomorrowEightAmIstIso();
+
+  if (publishImmediately) {
+    console.log("Manual run — publishing LIVE immediately");
+  } else {
+    console.log(`Scheduling go-live at ${publishAt} (tomorrow 08:00 AM IST)`);
+  }
 
   const publishPayload = {
     title: blog.title,
@@ -519,8 +542,8 @@ async function main() {
     faqSchema,
     author,
     read_time: calcReadTime(blog.content),
-    published: false,
-    status: "scheduled",
+    published: publishImmediately,
+    status: publishImmediately ? "published" : "scheduled",
     publishAt,
     scheduledDate: publishAt,
     source: "automation",
@@ -528,7 +551,12 @@ async function main() {
   };
 
   try {
-    console.log("Layer 5: Saving SCHEDULED post to", BLOG_API_URL);
+    console.log(
+      publishImmediately
+        ? "Layer 5: Publishing LIVE to"
+        : "Layer 5: Saving SCHEDULED post to",
+      BLOG_API_URL
+    );
     const result = await publishBlog(publishPayload);
     const blogId = result.blog_id || result._id || result.id;
     const adminEditUrl = blogId
@@ -538,11 +566,16 @@ async function main() {
       ? result.url
       : `https://zoradevs.com${result.url || `/blog/${blog.slug}`}`;
 
-    console.log("Scheduled (not live yet):", publicPath);
-    console.log("Goes live:", publishAt);
+    if (publishImmediately) {
+      console.log("Published live:", publicPath);
+    } else {
+      console.log("Scheduled (not live yet):", publicPath);
+      console.log("Goes live:", publishAt);
+    }
     console.log("Admin preview:", adminEditUrl);
 
     const topicKey = topicEntry.topic_key ?? slugify(topicEntry.keywords[0]);
+    const logStatus = publishImmediately ? "success" : "scheduled";
     const successLog = {
       date,
       topicKey,
@@ -551,8 +584,8 @@ async function main() {
       category: topicEntry.category,
       service: topicEntry.service ?? "",
       source,
-      url: adminEditUrl,
-      status: "scheduled",
+      url: publishImmediately ? publicPath : adminEditUrl,
+      status: logStatus,
     };
 
     log.published.push({
@@ -560,8 +593,8 @@ async function main() {
       keyword: publishKeywords[0],
       title: blog.title,
       keywords: publishKeywords,
-      url: adminEditUrl,
-      status: "scheduled",
+      url: publishImmediately ? publicPath : adminEditUrl,
+      status: logStatus,
       source,
       publishAt,
       unsplashId: cover.unsplashId || cover.imageId || null,
