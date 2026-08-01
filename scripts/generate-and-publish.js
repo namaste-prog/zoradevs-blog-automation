@@ -19,6 +19,7 @@ import {
   writeBlogMetadata,
   writeB2BBlogBody,
   titleContainsAi,
+  isAcceptableBlogTitle,
   ensureQualityKeywords,
 } from "./lib/pipeline.js";
 import { pickUniqueCandidate, slugify, ensureAiInKeywords, isDuplicate } from "./lib/dedup.js";
@@ -310,7 +311,7 @@ async function runB2BPipeline(config) {
 }
 
 /**
- * Metadata pass with strict AI-in-title validation (up to 3 regenerations).
+ * Metadata pass with AI-in-title + banned-opener validation (up to 3 regenerations).
  */
 async function writeBlogWithTitleValidation(brief) {
   const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 15);
@@ -318,18 +319,23 @@ async function writeBlogWithTitleValidation(brief) {
   await sleep(delaySec * 1000);
 
   let meta = null;
+  const rejectedTitles = [];
   for (let attempt = 1; attempt <= TITLE_META_RETRIES; attempt++) {
     console.log(`Writer pass: metadata + FAQs (attempt ${attempt}/${TITLE_META_RETRIES})...`);
-    meta = await writeBlogMetadata(brief);
+    meta = await writeBlogMetadata(brief, { rejectedTitles });
 
-    if (titleContainsAi(meta.title)) {
-      console.log(`Title AI validation passed (attempt ${attempt}): ${meta.title}`);
+    if (isAcceptableBlogTitle(meta.title)) {
+      console.log(`Title validation passed (attempt ${attempt}): ${meta.title}`);
       break;
     }
 
+    const reason = !titleContainsAi(meta.title)
+      ? 'missing "AI"'
+      : "banned hype opener (e.g. Revolutionizing)";
     console.warn(
-      `Title missing "AI" (attempt ${attempt}): "${meta.title}" — forcing metadata regeneration...`
+      `Title rejected (${reason}, attempt ${attempt}): "${meta.title}" — forcing metadata regeneration...`
     );
+    rejectedTitles.push(meta.title);
     meta = null;
     if (attempt < TITLE_META_RETRIES) {
       const coolSec = Number(process.env.GROQ_PART_DELAY_SEC ?? 25);
@@ -337,9 +343,9 @@ async function writeBlogWithTitleValidation(brief) {
     }
   }
 
-  if (!meta || !titleContainsAi(meta.title)) {
+  if (!meta || !isAcceptableBlogTitle(meta.title)) {
     throw new Error(
-      `Title must contain "AI" (case-insensitive) after ${TITLE_META_RETRIES} metadata retries`
+      `Title must include "AI" and avoid banned openers after ${TITLE_META_RETRIES} metadata retries`
     );
   }
 
@@ -578,8 +584,10 @@ async function main() {
         blog.tags = blog.keywords.slice(0, 5);
       }
 
-      if (!titleContainsAi(blog.title)) {
-        throw new Error(`Final title missing "AI": ${blog.title}`);
+      if (!isAcceptableBlogTitle(blog.title)) {
+        throw new Error(
+          `Final title invalid (must include AI and avoid banned openers): ${blog.title}`
+        );
       }
 
       blog.faqs = (Array.isArray(blog.faqs) ? blog.faqs : [])
