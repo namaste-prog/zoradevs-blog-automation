@@ -28,6 +28,41 @@ export function titleContainsAi(title) {
   return /ai/i.test(String(title || ""));
 }
 
+/** Overused LLM marketing openers — titles must not start with these. */
+const BANNED_TITLE_OPENERS = [
+  "revolutionizing",
+  "revolutionary",
+  "unlocking",
+  "unleashing",
+  "leveraging",
+  "empowering",
+  "elevating",
+  "transforming",
+  "harnessing",
+  "supercharging",
+  "navigating",
+  "exploring",
+  "discovering",
+  "embracing",
+  "mastering",
+  "reimagining",
+  "disrupting",
+];
+
+export function titleHasBannedOpener(title) {
+  const first = String(title || "")
+    .trim()
+    .split(/[\s:—–-]+/)[0]
+    ?.toLowerCase()
+    .replace(/[^a-z]/g, "");
+  return Boolean(first && BANNED_TITLE_OPENERS.includes(first));
+}
+
+/** Title must include AI and must not open with a banned hype verb. */
+export function isAcceptableBlogTitle(title) {
+  return titleContainsAi(title) && !titleHasBannedOpener(title);
+}
+
 function regionInstruction(regionFocus) {
   return regionFocus === "pan-india"
     ? "Body prose may use Pan-India framing and mention Zoradevs' Delhi NCR / Noida presence where natural. Never put location or year into the title or H2/H3 headings."
@@ -108,9 +143,11 @@ BLOCKED: ${BLOCKED.join(", ")}
 
 TITLE / TOPIC RULES (critical):
 - topic and title_angle must look 100% natural, professional, and human-appealing
-- Good examples: "How AI is Transforming Modern E-Commerce Platforms", "Building Smarter Mobile Apps with AI", "Why AI Matters for Custom Software Teams"
+- Prefer concrete, specific angles (outcome, audience, or problem) — not hype verbs
+- Good examples: "How AI Cuts Cart Abandonment for Ecommerce Stores", "Building Smarter Mobile Apps with AI", "Why Custom Software Teams Need AI Workflows", "AI Chatbots That Reduce Support Costs for Startups"
 - MUST organically include "AI" or a clear AI concept (artificial intelligence, machine learning, generative AI, etc.)
 - MUST relate to one of our core services / industry verticals
+- DO NOT start topic or title_angle with hype openers: Revolutionizing, Unlocking, Leveraging, Transforming, Empowering, Elevating, Unleashing, Harnessing, Reimagining, Disrupting, Exploring, Discovering, Embracing, Mastering, Supercharging, Navigating
 - DO NOT force location words into topic or title_angle (no Noida, Delhi NCR, Gurgaon, India-as-geo-tag, etc.)
 - DO NOT force a year into topic or title_angle (no 2026, 2025, etc.)
 - DO NOT use rigid SEO formulas like "[Service] + AI + in [City] + [Year]"
@@ -145,16 +182,25 @@ Return JSON only:
 }`;
 }
 
-function buildMetaPrompt(brief) {
+function buildMetaPrompt(brief, { rejectedTitles = [] } = {}) {
+  const rejectBlock =
+    rejectedTitles.length > 0
+      ? `\nREJECTED TITLES (do not reuse these or the same opener pattern):\n${rejectedTitles
+          .map((t) => `- ${t}`)
+          .join("\n")}\n`
+      : "";
+
   return `You are an expert B2B SEO writer for ZoraDevs.
 
 ${briefBlock(brief)}
-
+${rejectBlock}
 STRICT TITLE RULES:
 - Title must look 100% natural, professional, and appealing to humans
-- Good example: "How AI is Transforming Modern E-Commerce Platforms"
+- Prefer a concrete outcome, audience, or problem — not a vague hype verb
+- Good examples: "How AI Cuts Cart Abandonment for Ecommerce Stores", "Building Smarter Mobile Apps with AI", "Why Custom Software Teams Need AI Workflows"
 - Title MUST organically include "AI" or a clear AI concept
 - Title MUST relate to our core service / topic
+- DO NOT start the title with: Revolutionizing, Unlocking, Leveraging, Transforming, Empowering, Elevating, Unleashing, Harnessing, Reimagining, Disrupting, Exploring, Discovering, Embracing, Mastering, Supercharging, Navigating
 - DO NOT put location in the title (no Noida, Delhi NCR, Gurgaon, India geo-tags)
 - DO NOT put a year in the title (no 2026, etc.)
 - DO NOT use formulaic SEO titles like "X AI in Noida 2026"
@@ -934,8 +980,8 @@ Rules:
 /**
  * Single metadata + FAQ pass (used by orchestrator for AI-title validation).
  */
-export async function writeBlogMetadata(brief) {
-  const metaText = await callGroq(buildMetaPrompt(brief), 0.45, {
+export async function writeBlogMetadata(brief, { rejectedTitles = [] } = {}) {
+  const metaText = await callGroq(buildMetaPrompt(brief, { rejectedTitles }), 0.45, {
     maxTokens: META_MAX_TOKENS,
     maxRetries: 4,
   });
@@ -1035,22 +1081,29 @@ export async function writeB2BBlog(brief, { maxTitleRetries = 3 } = {}) {
   await sleep(delaySec * 1000);
 
   let meta = null;
+  const rejectedTitles = [];
   for (let attempt = 1; attempt <= maxTitleRetries; attempt++) {
     console.log(`Writer pass: metadata + FAQs (attempt ${attempt}/${maxTitleRetries})...`);
-    meta = await writeBlogMetadata(brief);
-    if (titleContainsAi(meta.title)) {
-      console.log(`Title AI check passed: ${meta.title}`);
+    meta = await writeBlogMetadata(brief, { rejectedTitles });
+    if (isAcceptableBlogTitle(meta.title)) {
+      console.log(`Title check passed: ${meta.title}`);
       break;
     }
+    const reason = !titleContainsAi(meta.title)
+      ? 'missing "AI"'
+      : "banned hype opener";
     console.warn(
-      `Title missing "AI" (attempt ${attempt}): "${meta.title}" — regenerating metadata...`
+      `Title rejected (${reason}, attempt ${attempt}): "${meta.title}" — regenerating metadata...`
     );
+    rejectedTitles.push(meta.title);
     meta = null;
     if (attempt < maxTitleRetries) await sleep(partDelayMs());
   }
 
-  if (!meta || !titleContainsAi(meta.title)) {
-    throw new Error(`Title must contain "AI" after ${maxTitleRetries} metadata retries`);
+  if (!meta || !isAcceptableBlogTitle(meta.title)) {
+    throw new Error(
+      `Title must include "AI" and avoid banned openers after ${maxTitleRetries} metadata retries`
+    );
   }
 
   return writeB2BBlogBody(brief, meta);
