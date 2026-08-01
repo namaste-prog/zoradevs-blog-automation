@@ -2,12 +2,14 @@ name: Schedule Daily Blog
 
 on:
   schedule:
-    # Every day 7:00 PM IST (13:30 UTC) — generates tomorrow's post (go-live 08:00 AM IST)
+    # Every day 7:00 PM IST (13:30 UTC) — generates tomorrow's post (go-live 07:00 AM IST)
     - cron: "30 13 * * *"
+    # Every day 7:00 AM IST (01:30 UTC) — catch-up: publish live if last night failed
+    - cron: "30 1 * * *"
   workflow_dispatch:
     inputs:
       force_publish:
-        description: "Force create another scheduled post even if one was already logged today"
+        description: "Force create another post even if one was already logged today"
         required: false
         default: "true"
         type: choice
@@ -32,6 +34,7 @@ jobs:
       - run: npm ci
 
       - name: Generate and schedule B2B blog
+        id: generate
         run: node scripts/generate-and-publish.js
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -45,6 +48,8 @@ jobs:
           GROQ_META_MAX_TOKENS: "3500"
           GROQ_PART_MAX_TOKENS: "4000"
           GROQ_MAX_TOKENS: "4500"
+          PIPELINE_ATTEMPTS: "3"
+          PUBLISH_ATTEMPTS: "3"
           BLOG_API_SECRET: ${{ secrets.BLOG_API_SECRET }}
           BLOG_API_URL: ${{ secrets.BLOG_API_URL }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
@@ -53,9 +58,19 @@ jobs:
           GOOGLE_CSE_CX: ${{ secrets.GOOGLE_CSE_CX }}
           FORCE_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_publish || 'false' }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-          PUBLISH_IMMEDIATELY: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Failure email (optional — Resend)
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          # Morning catch-up cron (01:30 UTC) publishes live if yesterday evening failed
+          MORNING_CATCH_UP: ${{ github.event.schedule == '30 1 * * *' && 'true' || 'false' }}
+          PUBLISH_IMMEDIATELY: ${{ (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 1 * * *') && 'true' || 'false' }}
 
       - name: Commit log and LinkedIn queue
+        if: success()
         run: |
           git config user.name "Blog Bot"
           git config user.email "bot@zoradevs.com"
@@ -66,3 +81,41 @@ jobs:
             git commit -m "Auto: scheduled blog + linkedin post [skip ci]"
             git push
           fi
+
+      # Email on ANY failure (script error, npm, etc.). Uses Gmail/Zoho/SMTP secrets.
+      - name: Build failure email body
+        if: failure()
+        continue-on-error: true
+        run: |
+          {
+            echo "ZoraDevs blog automation FAILED"
+            echo "================================"
+            echo "Workflow: ${{ github.workflow }}"
+            echo "Event: ${{ github.event_name }}"
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo ""
+            if [ -f failure_report.txt ]; then
+              echo "--- Script error report ---"
+              cat failure_report.txt
+            else
+              echo "No failure_report.txt (job may have failed before the script finished)."
+              echo "Open the run link above for full logs."
+            fi
+            echo ""
+            echo "Re-run with force_publish=true to catch up."
+          } > /tmp/blog-failure-email.txt
+
+      - name: Email failure alert (SMTP)
+        if: failure()
+        continue-on-error: true
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT || 587 }}
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASS }}
+          subject: "[ZoraDevs] Blog automation FAILED — run #${{ github.run_number }}"
+          to: ${{ secrets.ALERT_EMAIL_TO }}
+          from: Blog Bot <${{ secrets.ALERT_EMAIL_FROM || secrets.SMTP_USER }}>
+          body: file:///tmp/blog-failure-email.txt
+          ignore_cert: true

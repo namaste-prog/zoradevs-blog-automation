@@ -25,6 +25,7 @@ import { pickUniqueCandidate, slugify, ensureAiInKeywords, isDuplicate } from ".
 import { buildFaqSchema } from "./lib/faq-schema.js";
 import { fetchBlogCoverImage, saveUsedUnsplashId, loadUsedUnsplashIds } from "./lib/unsplash.js";
 import { GROQ_MODEL, sleep } from "./lib/groq.js";
+import { writeFailureReport, sendFailureEmail } from "./lib/alert-email.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -39,6 +40,8 @@ const BLOG_AUTOMATION_URL =
   BLOG_API_URL.replace(/\/api\/blogs\/?$/, "/api/automation/config");
 
 const TITLE_META_RETRIES = 3;
+const PIPELINE_ATTEMPTS = Math.max(1, Number(process.env.PIPELINE_ATTEMPTS || 3));
+const PUBLISH_ATTEMPTS = Math.max(1, Number(process.env.PUBLISH_ATTEMPTS || 3));
 
 const authHeaders = {
   Authorization: `Bearer ${BLOG_API_SECRET}`,
@@ -52,22 +55,52 @@ function getWeekdaySlot() {
   return 5;
 }
 
+/** Calendar date in IST (YYYY-MM-DD) — used for one-post-per-day guards. */
 function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 }
 
 /**
- * Tomorrow 08:00 AM IST as UTC ISO string.
- * IST = UTC+05:30 → 08:00 IST = 02:30 UTC.
+ * Tomorrow 07:00 AM IST as UTC ISO string.
+ * IST = UTC+05:30 → 07:00 IST = 01:30 UTC.
  */
-function tomorrowEightAmIstIso() {
+function tomorrowSevenAmIstIso() {
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
   const istNow = new Date(Date.now() + IST_OFFSET_MS);
   const y = istNow.getUTCFullYear();
   const m = istNow.getUTCMonth();
   const d = istNow.getUTCDate();
-  // Calendar tomorrow in IST, at 08:00 IST (= 02:30 UTC)
-  return new Date(Date.UTC(y, m, d + 1, 2, 30, 0, 0)).toISOString();
+  // Calendar tomorrow in IST, at 07:00 IST (= 01:30 UTC)
+  return new Date(Date.UTC(y, m, d + 1, 1, 30, 0, 0)).toISOString();
+}
+
+function morningCatchUpEnabled() {
+  return String(process.env.MORNING_CATCH_UP || "").toLowerCase() === "true";
+}
+
+/** True if today's IST calendar already has a generated or go-live post. */
+function alreadyCoveredForToday(log) {
+  const today = todayISO();
+  for (const p of log.published || []) {
+    if (
+      p.date === today &&
+      (p.status === "success" || p.status === "draft" || p.status === "scheduled")
+    ) {
+      return true;
+    }
+    if (p.publishAt) {
+      const goLiveIst = new Date(p.publishAt).toLocaleDateString("en-CA", {
+        timeZone: "Asia/Kolkata",
+      });
+      if (
+        goLiveIst === today &&
+        (p.status === "success" || p.status === "scheduled")
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function readJson(file) {
@@ -99,10 +132,46 @@ function forcePublishEnabled() {
   return String(process.env.FORCE_PUBLISH || "").toLowerCase() === "true";
 }
 
-/** Manual GitHub runs go live immediately; cron schedules for tomorrow 08:00 IST. */
+/** Manual GitHub runs + morning catch-up go live immediately; evening cron schedules for tomorrow 07:00 IST. */
 function shouldPublishImmediately() {
   if (String(process.env.PUBLISH_IMMEDIATELY || "").toLowerCase() === "true") return true;
+  if (morningCatchUpEnabled()) return true;
   return process.env.GITHUB_EVENT_NAME === "workflow_dispatch";
+}
+
+/** Collect slugs already used in local publish log. */
+function usedSlugsFromLog(log) {
+  const used = new Set();
+  for (const entry of log.published || []) {
+    const fromUrl = String(entry.url || "").match(/\/blog\/([a-z0-9-]+)/i)?.[1];
+    if (fromUrl) used.add(fromUrl.toLowerCase());
+    if (entry.slug) used.add(String(entry.slug).toLowerCase());
+    if (entry.title) used.add(slugify(entry.title));
+  }
+  return used;
+}
+
+/** Ensure slug is unique vs local history; append date stamp when needed. */
+function ensureUniqueSlug(rawSlug, title, log) {
+  const base = slugify(rawSlug || title || `ai-blog-${Date.now()}`) || `ai-blog-${Date.now()}`;
+  const used = usedSlugsFromLog(log);
+  if (!used.has(base)) return base;
+
+  const stamp = todayISO().replace(/-/g, "");
+  let candidate = `${base.slice(0, 60)}-${stamp}`.replace(/-+/g, "-").replace(/-$/, "");
+  let n = 2;
+  while (used.has(candidate)) {
+    candidate = `${base.slice(0, 55)}-${stamp}-${n}`.replace(/-+/g, "-").replace(/-$/, "");
+    n += 1;
+  }
+  console.warn(`Slug already used — uniquified: ${base} → ${candidate}`);
+  return candidate;
+}
+
+function isSlugConflictError(err) {
+  const data = err?.response?.data;
+  const msg = String(data?.error || data?.message || err?.message || "").toLowerCase();
+  return err?.response?.status === 409 || msg.includes("slug already exists");
 }
 
 /** If topic collides with history, rewrite into a unique natural AI angle (geo stays in keywords). */
@@ -306,6 +375,49 @@ async function publishBlog(payload) {
   return res.data;
 }
 
+/** Retry publish on slug conflict / transient API errors. */
+async function publishBlogWithRetries(payload, blog, log) {
+  let lastErr;
+  for (let attempt = 1; attempt <= PUBLISH_ATTEMPTS; attempt++) {
+    try {
+      return await publishBlog(payload);
+    } catch (err) {
+      lastErr = err;
+      const status = err?.response?.status;
+      const data = err?.response?.data;
+
+      if (isSlugConflictError(err)) {
+        const retrySlug = ensureUniqueSlug(
+          `${blog.slug || "ai-blog"}-${Date.now().toString(36)}-${attempt}`,
+          blog.title,
+          log
+        );
+        console.warn(
+          `Publish attempt ${attempt}/${PUBLISH_ATTEMPTS}: slug conflict — retrying as ${retrySlug}`
+        );
+        blog.slug = retrySlug;
+        payload.slug = retrySlug;
+        continue;
+      }
+
+      // Transient network / 5xx — wait and retry same payload
+      if (!status || status >= 500 || status === 429) {
+        const waitSec = Math.min(30, 5 * attempt);
+        console.warn(
+          `Publish attempt ${attempt}/${PUBLISH_ATTEMPTS} failed (${status || err.message}) — waiting ${waitSec}s...`
+        );
+        await sleep(waitSec * 1000);
+        continue;
+      }
+
+      // Non-retryable 4xx (except slug handled above)
+      console.error("Publish rejected:", data ?? err.message);
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
 async function main() {
   if (!BLOG_API_SECRET) {
     console.error("Missing BLOG_API_SECRET");
@@ -336,20 +448,36 @@ async function main() {
     console.warn("Config API unavailable, using defaults:", err.message);
   }
 
+  const log = readJson("published_log.json");
+
   if (config.publishedToday?.title) {
     if (forcePublishEnabled()) {
       console.warn(
         `FORCE_PUBLISH=true — ignoring already-published-today marker: ${config.publishedToday.title}`
       );
-    } else {
+    } else if (morningCatchUpEnabled() && alreadyCoveredForToday(log)) {
+      console.log("Morning catch-up: today already covered — skipping.");
+      process.exit(0);
+    } else if (!morningCatchUpEnabled()) {
       console.log("Already published today:", config.publishedToday.title);
       console.log("Tip: re-run workflow with force_publish=true to publish another blog today.");
       process.exit(0);
     }
   }
 
-  const log = readJson("published_log.json");
-  if (log.published?.find((p) => p.date === date && (p.status === "success" || p.status === "draft" || p.status === "scheduled"))) {
+  if (morningCatchUpEnabled()) {
+    if (alreadyCoveredForToday(log) && !forcePublishEnabled()) {
+      console.log("Morning catch-up: a post already covers today (generated or go-live) — skipping.");
+      process.exit(0);
+    }
+    console.log("Morning catch-up mode: will publish LIVE if generation succeeds.");
+  } else if (
+    log.published?.find(
+      (p) =>
+        p.date === date &&
+        (p.status === "success" || p.status === "draft" || p.status === "scheduled")
+    )
+  ) {
     if (forcePublishEnabled()) {
       console.warn("FORCE_PUBLISH=true — ignoring local published_log for today.");
     } else {
@@ -359,256 +487,295 @@ async function main() {
     }
   }
 
-  let topicEntry;
-  try {
-    if (config.autoTrendEnabled !== false) {
-      topicEntry = await runB2BPipeline(config);
-    } else {
-      console.log("B2B pipeline disabled — using manual fallback keywords");
-      topicEntry = await fetchKeywordEntry(daySlot);
-    }
-  } catch (err) {
-    if (err.code === "GROQ_TPD" || /tokens per day|\(tpd\)/i.test(err.message)) {
-      console.error("Groq daily token limit hit during topic generation — aborting (fallback would also fail).");
-      console.error(err.message);
-      process.exit(1);
-    }
-    console.warn("B2B pipeline failed, hybrid fallback:", err.message);
-    topicEntry = await fetchKeywordEntry(daySlot);
-  }
+  let lastError = null;
 
-  // Merge API recent topics + local log for stronger no-repeat guarantee.
-  const localRecent = (log.published || [])
-    .filter((p) => p.status === "success")
-    .map((p) => ({
-      title: p.title,
-      topicKey: slugify(p.keyword || p.title || ""),
-      keywords: p.keywords || [p.keyword].filter(Boolean),
-      keyword: p.keyword,
-    }));
-  const allRecent = [...(config.recentTopics ?? []), ...localRecent];
-  topicEntry = uniquifyTopicEntry(topicEntry, allRecent);
-  topicEntry.keywords = ensureAiInKeywords(topicEntry.keywords);
+  for (let pipelineAttempt = 1; pipelineAttempt <= PIPELINE_ATTEMPTS; pipelineAttempt++) {
+    console.log(`\n======== Pipeline attempt ${pipelineAttempt}/${PIPELINE_ATTEMPTS} ========`);
 
-  if (isDuplicate(topicEntry, allRecent)) {
-    // Last resort unique key so we never hard-stop a weekday publish.
-    topicEntry.topic_key = slugify(`${topicEntry.keywords[0]}-${Date.now()}`);
-    topicEntry.keywords = ensureAiInKeywords([
-      `AI development company Noida ${todayISO()}`,
-      "AI automation Delhi NCR",
-      "custom software Gurgaon AI",
-      "hire AI developers Delhi",
-      "Pan India AI software services",
-    ]);
-    topicEntry.topic = "How AI Is Transforming Modern Software Development";
-    topicEntry.title_angle = topicEntry.topic;
-    console.warn("Applied last-resort unique topic for today.");
-  }
+    try {
+      let topicEntry;
+      try {
+        if (config.autoTrendEnabled !== false) {
+          topicEntry = await runB2BPipeline(config);
+        } else {
+          console.log("B2B pipeline disabled — using manual fallback keywords");
+          topicEntry = await fetchKeywordEntry(daySlot);
+        }
+      } catch (err) {
+        if (err.code === "GROQ_TPD" || /tokens per day|\(tpd\)/i.test(err.message)) {
+          throw err;
+        }
+        console.warn("B2B pipeline failed, hybrid fallback:", err.message);
+        topicEntry = await fetchKeywordEntry(daySlot);
+      }
 
-  const brief = {
-    service: topicEntry.service ?? topicEntry.category,
-    topic: topicEntry.topic || topicEntry.title_angle,
-    primaryKeyword: topicEntry.keywords[0],
-    secondaryKeywords: topicEntry.keywords.slice(1),
-    category: topicEntry.category,
-    titleAngle: topicEntry.title_angle ?? topicEntry.topic,
-    indiaAngle:
-      topicEntry.india_angle ??
-      "Delhi NCR (Noida, Gurgaon, Delhi) first; Pan-India as secondary",
-    regionFocus: topicEntry.region_focus || "delhi-ncr",
-  };
+      // Merge API recent topics + local log for stronger no-repeat guarantee.
+      const localRecent = (log.published || [])
+        .filter((p) => p.status === "success" || p.status === "scheduled")
+        .map((p) => ({
+          title: p.title,
+          topicKey: slugify(p.keyword || p.title || ""),
+          keywords: p.keywords || [p.keyword].filter(Boolean),
+          keyword: p.keyword,
+        }));
+      const allRecent = [...(config.recentTopics ?? []), ...localRecent];
+      topicEntry = uniquifyTopicEntry(topicEntry, allRecent);
+      topicEntry.keywords = ensureAiInKeywords(topicEntry.keywords);
 
-  const source = topicEntry.source ?? "b2b-pipeline";
-  console.log(`Layer 4: Writing blog with Groq (${GROQ_MODEL}) [${source}]...`);
+      if (isDuplicate(topicEntry, allRecent)) {
+        topicEntry.topic_key = slugify(`${topicEntry.keywords[0]}-${Date.now()}`);
+        topicEntry.keywords = ensureAiInKeywords([
+          `AI software delivery strategies ${todayISO()}`,
+          "AI product engineering for founders",
+          "custom AI solutions for startups",
+          "AI automation for growing businesses",
+          "hire AI developers Noida",
+        ]);
+        topicEntry.topic = `How AI Is Transforming Modern Software Development ${todayISO().slice(5)}`;
+        topicEntry.title_angle = topicEntry.topic;
+        console.warn("Applied last-resort unique topic for today.");
+      }
 
-  let blog;
-  try {
-    blog = await writeBlogWithTitleValidation(brief);
-    if (!blog.slug) blog.slug = slugify(blog.title);
+      // On retry, nudge topic so title/slug diverge from a previous conflict.
+      if (pipelineAttempt > 1) {
+        const stamp = `${todayISO().slice(5)}-${pipelineAttempt}`;
+        topicEntry.topic_key = slugify(`${topicEntry.topic_key || topicEntry.topic}-${stamp}`);
+        topicEntry.title_angle = `${topicEntry.title_angle || topicEntry.topic}`.replace(
+          /\s+$/,
+          ""
+        );
+        console.warn(`Retry uniqueness stamp applied: ${stamp}`);
+      }
 
-    // Final keyword pass: exactly 5 phrases tied to this blog (local Noida OK in keywords only).
-    blog.keywords = await ensureQualityKeywords(
-      { ...brief, title: blog.title, excerpt: blog.excerpt },
-      blog.title,
-      blog.keywords ?? topicEntry.keywords,
-      blog.excerpt
-    );
+      const brief = {
+        service: topicEntry.service ?? topicEntry.category,
+        topic: topicEntry.topic || topicEntry.title_angle,
+        primaryKeyword: topicEntry.keywords[0],
+        secondaryKeywords: topicEntry.keywords.slice(1),
+        category: topicEntry.category,
+        titleAngle: topicEntry.title_angle ?? topicEntry.topic,
+        indiaAngle:
+          topicEntry.india_angle ??
+          "Delhi NCR (Noida, Gurgaon, Delhi) first; Pan-India as secondary",
+        regionFocus: topicEntry.region_focus || "delhi-ncr",
+      };
 
-    if (!Array.isArray(blog.tags) || !blog.tags.length) {
-      blog.tags = blog.keywords.slice(0, 5);
-    }
+      const source = topicEntry.source ?? "b2b-pipeline";
+      console.log(`Layer 4: Writing blog with Groq (${GROQ_MODEL}) [${source}]...`);
 
-    // Final safety: title must still contain AI after full write.
-    if (!titleContainsAi(blog.title)) {
-      throw new Error(`Final title missing "AI": ${blog.title}`);
-    }
-  } catch (err) {
-    console.error("Groq writer failed:", err.message);
-    if (err.code === "GROQ_TPD" || /tokens per day|\(tpd\)/i.test(err.message)) {
-      console.error(
-        "Tip: Free-tier daily tokens for llama-3.3-70b are exhausted. " +
-          "The bot will auto-try llama-3.1-8b-instant next run. " +
-          "Or wait for daily reset / upgrade Groq Dev Tier: https://console.groq.com/settings/billing"
+      let blog = await writeBlogWithTitleValidation(brief);
+      if (!blog.slug) blog.slug = slugify(blog.title);
+      blog.slug = ensureUniqueSlug(blog.slug, blog.title, log);
+
+      blog.keywords = await ensureQualityKeywords(
+        { ...brief, title: blog.title, excerpt: blog.excerpt },
+        blog.title,
+        blog.keywords ?? topicEntry.keywords,
+        blog.excerpt
       );
-    } else if (err.status === 429) {
-      console.error(
-        "Tip: Groq rate limit — re-run in a few minutes, or raise GROQ_PART_DELAY_SEC."
+
+      if (!Array.isArray(blog.tags) || !blog.tags.length) {
+        blog.tags = blog.keywords.slice(0, 5);
+      }
+
+      if (!titleContainsAi(blog.title)) {
+        throw new Error(`Final title missing "AI": ${blog.title}`);
+      }
+
+      blog.faqs = (Array.isArray(blog.faqs) ? blog.faqs : [])
+        .map((f) => ({
+          question: String(f?.question || "").trim().slice(0, 300),
+          answer: String(f?.answer || "").trim().slice(0, 1800),
+        }))
+        .filter((f) => f.question.length >= 5 && f.answer.length >= 10)
+        .slice(0, 10);
+
+      const faqSchema = buildFaqSchema(blog.faqs);
+      if (!faqSchema?.mainEntity?.length) {
+        throw new Error("FAQ schema missing — need FAQs for SEO");
+      }
+      console.log(`FAQ schema ready: ${faqSchema.mainEntity.length} questions`);
+
+      const usedFromLog = (log.published || [])
+        .map((p) => p.unsplashId)
+        .filter(Boolean);
+      const excludeIds = [...loadUsedUnsplashIds(usedFromLog)];
+
+      console.log("Fetching landscape cover from dynamic imageQuery (Unsplash then Pexels)...");
+      if (!blog.imageQuery) {
+        console.warn("Missing imageQuery — cover search may be weak");
+      } else {
+        console.log("imageQuery:", blog.imageQuery);
+      }
+
+      let cover;
+      try {
+        cover = await fetchBlogCoverImage({
+          imageQuery: blog.imageQuery,
+          keywords: blog.keywords ?? topicEntry.keywords,
+          keyword: topicEntry.keywords[0],
+          category: topicEntry.category,
+          service: topicEntry.service,
+          excludeIds,
+        });
+      } catch (imgErr) {
+        console.warn("Cover fetch failed — using category fallback:", imgErr.message);
+        cover = {
+          url: `https://zoradevs.com/img/web-app.jpg`,
+          unsplashId: null,
+          imageId: null,
+          imageCredit: undefined,
+        };
+      }
+
+      if (cover.unsplashId || cover.imageId) {
+        saveUsedUnsplashId(cover.unsplashId || cover.imageId);
+      }
+
+      const publishKeywords = blog.keywords.slice(0, 5);
+      blog.keywords = publishKeywords;
+      console.log(`Publish keywords (exactly ${publishKeywords.length}): ${publishKeywords.join(" | ")}`);
+
+      const imageAlt = publishKeywords[0] || blog.title;
+      const author = pickRandomAuthor();
+      console.log("Author:", author);
+      console.log("Image alt:", imageAlt);
+      console.log("Final imageQuery:", blog.imageQuery);
+      console.log(
+        "ZoraDevs links in content:",
+        (blog.content.match(/https?:\/\/(?:www\.)?zoradevs\.com/gi) || []).length
       );
+
+      const publishImmediately = shouldPublishImmediately();
+      const publishAt = publishImmediately
+        ? new Date().toISOString()
+        : tomorrowSevenAmIstIso();
+
+      if (publishImmediately) {
+        console.log("Publishing LIVE immediately (manual or morning catch-up)");
+      } else {
+        console.log(`Scheduling go-live at ${publishAt} (tomorrow 07:00 AM IST)`);
+      }
+
+      const publishPayload = {
+        title: blog.title,
+        slug: blog.slug,
+        excerpt: blog.excerpt,
+        content: blog.content,
+        image: cover.url,
+        alt: imageAlt,
+        image_alt: imageAlt,
+        image_credit: cover.imageCredit ?? undefined,
+        category: topicEntry.category,
+        tags: blog.tags ?? blog.keywords,
+        meta_title: blog.meta_title,
+        meta_description: blog.meta_description,
+        keywords: publishKeywords,
+        faqs: blog.faqs,
+        faqSchema,
+        author,
+        read_time: calcReadTime(blog.content),
+        published: publishImmediately,
+        status: publishImmediately ? "published" : "scheduled",
+        publishAt,
+        scheduledDate: publishAt,
+        source: "automation",
+        service: topicEntry.service ?? "",
+      };
+
+      console.log(
+        publishImmediately
+          ? "Layer 5: Publishing LIVE to"
+          : "Layer 5: Saving SCHEDULED post to",
+        BLOG_API_URL
+      );
+
+      const result = await publishBlogWithRetries(publishPayload, blog, log);
+      const blogId = result.blog_id || result._id || result.id;
+      const adminEditUrl = blogId
+        ? `https://zoradevs.com/admin/blogs/${blogId}`
+        : `https://zoradevs.com/admin/blogs`;
+      const publicPath = result.url?.startsWith("http")
+        ? result.url
+        : `https://zoradevs.com${result.url || `/blog/${blog.slug}`}`;
+
+      if (publishImmediately) {
+        console.log("Published live:", publicPath);
+      } else {
+        console.log("Scheduled (not live yet):", publicPath);
+        console.log("Goes live:", publishAt);
+      }
+      console.log("Admin preview:", adminEditUrl);
+
+      const topicKey = topicEntry.topic_key ?? slugify(topicEntry.keywords[0]);
+      const logStatus = publishImmediately ? "success" : "scheduled";
+      const successLog = {
+        date,
+        topicKey,
+        title: blog.title,
+        keywords: publishKeywords,
+        category: topicEntry.category,
+        service: topicEntry.service ?? "",
+        source,
+        url: publishImmediately ? publicPath : adminEditUrl,
+        status: logStatus,
+      };
+
+      log.published.push({
+        date,
+        keyword: publishKeywords[0],
+        title: blog.title,
+        keywords: publishKeywords,
+        url: publishImmediately ? publicPath : adminEditUrl,
+        status: logStatus,
+        source,
+        publishAt,
+        unsplashId: cover.unsplashId || cover.imageId || null,
+        imageQuery: blog.imageQuery || null,
+        blogId: blogId || null,
+        slug: blog.slug,
+      });
+      writeJson("published_log.json", log);
+      await logPublishToApi(successLog);
+
+      appendLinkedInPost(buildLinkedInPost(blog, topicEntry.category));
+      console.log(`Pipeline succeeded on attempt ${pipelineAttempt}/${PIPELINE_ATTEMPTS}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const msg = err?.response?.data ?? err.message;
+      console.error(`Pipeline attempt ${pipelineAttempt}/${PIPELINE_ATTEMPTS} failed:`, msg);
+
+      if (err.code === "GROQ_TPD" || /tokens per day|\(tpd\)/i.test(String(err.message))) {
+        console.error(
+          "Groq daily token limit hit — further retries will also fail until reset."
+        );
+        break;
+      }
+
+      if (pipelineAttempt < PIPELINE_ATTEMPTS) {
+        const waitSec = Math.min(60, 15 * pipelineAttempt);
+        console.warn(`Retrying full pipeline in ${waitSec}s with a fresh topic/slug...`);
+        await sleep(waitSec * 1000);
+      }
     }
-    process.exit(1);
   }
 
-  // Sanitize FAQs so overlong answers never get dropped by the website API validator.
-  blog.faqs = (Array.isArray(blog.faqs) ? blog.faqs : [])
-    .map((f) => ({
-      question: String(f?.question || "").trim().slice(0, 300),
-      answer: String(f?.answer || "").trim().slice(0, 1800),
-    }))
-    .filter((f) => f.question.length >= 5 && f.answer.length >= 10)
-    .slice(0, 10);
+  console.error("All pipeline attempts failed:", lastError?.response?.data ?? lastError?.message);
 
-  const faqSchema = buildFaqSchema(blog.faqs);
-  if (!faqSchema?.mainEntity?.length) {
-    console.error("FAQ schema missing — aborting publish (need FAQs for SEO)");
-    process.exit(1);
-  }
-  console.log(`FAQ schema ready: ${faqSchema.mainEntity.length} questions`);
+  const runUrl =
+    process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
+      ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+      : "";
 
-  const usedFromLog = (log.published || [])
-    .map((p) => p.unsplashId)
-    .filter(Boolean);
-  const excludeIds = [...loadUsedUnsplashIds(usedFromLog)];
-
-  console.log("Fetching landscape cover from dynamic imageQuery (Unsplash then Pexels)...");
-  if (!blog.imageQuery) {
-    console.warn("Missing imageQuery — cover search may be weak");
-  } else {
-    console.log("imageQuery:", blog.imageQuery);
-  }
-  const cover = await fetchBlogCoverImage({
-    imageQuery: blog.imageQuery,
-    keywords: blog.keywords ?? topicEntry.keywords,
-    keyword: topicEntry.keywords[0],
-    category: topicEntry.category,
-    service: topicEntry.service,
-    excludeIds,
+  const report = writeFailureReport({
+    error: lastError,
+    eventName: process.env.GITHUB_EVENT_NAME || "local",
+    runUrl,
   });
+  await sendFailureEmail(report.body).catch(() => false);
 
-  if (cover.unsplashId || cover.imageId) {
-    saveUsedUnsplashId(cover.unsplashId || cover.imageId);
-  }
-
-  const publishKeywords = blog.keywords.slice(0, 5);
-  blog.keywords = publishKeywords;
-  console.log(`Publish keywords (exactly ${publishKeywords.length}): ${publishKeywords.join(" | ")}`);
-
-  const imageAlt = publishKeywords[0] || blog.title;
-
-  const author = pickRandomAuthor();
-  console.log("Author:", author);
-  console.log("Image alt:", imageAlt);
-  console.log("Final imageQuery:", blog.imageQuery);
-  console.log(
-    "ZoraDevs links in content:",
-    (blog.content.match(/https?:\/\/(?:www\.)?zoradevs\.com/gi) || []).length
-  );
-
-  const publishImmediately = shouldPublishImmediately();
-  const publishAt = publishImmediately
-    ? new Date().toISOString()
-    : tomorrowEightAmIstIso();
-
-  if (publishImmediately) {
-    console.log("Manual run — publishing LIVE immediately");
-  } else {
-    console.log(`Scheduling go-live at ${publishAt} (tomorrow 08:00 AM IST)`);
-  }
-
-  const publishPayload = {
-    title: blog.title,
-    slug: blog.slug,
-    excerpt: blog.excerpt,
-    content: blog.content,
-    image: cover.url,
-    alt: imageAlt,
-    image_alt: imageAlt,
-    image_credit: cover.imageCredit ?? undefined,
-    category: topicEntry.category,
-    tags: blog.tags ?? blog.keywords,
-    meta_title: blog.meta_title,
-    meta_description: blog.meta_description,
-    keywords: publishKeywords,
-    faqs: blog.faqs,
-    faqSchema,
-    author,
-    read_time: calcReadTime(blog.content),
-    published: publishImmediately,
-    status: publishImmediately ? "published" : "scheduled",
-    publishAt,
-    scheduledDate: publishAt,
-    source: "automation",
-    service: topicEntry.service ?? "",
-  };
-
-  try {
-    console.log(
-      publishImmediately
-        ? "Layer 5: Publishing LIVE to"
-        : "Layer 5: Saving SCHEDULED post to",
-      BLOG_API_URL
-    );
-    const result = await publishBlog(publishPayload);
-    const blogId = result.blog_id || result._id || result.id;
-    const adminEditUrl = blogId
-      ? `https://zoradevs.com/admin/blogs/${blogId}`
-      : `https://zoradevs.com/admin/blogs`;
-    const publicPath = result.url?.startsWith("http")
-      ? result.url
-      : `https://zoradevs.com${result.url || `/blog/${blog.slug}`}`;
-
-    if (publishImmediately) {
-      console.log("Published live:", publicPath);
-    } else {
-      console.log("Scheduled (not live yet):", publicPath);
-      console.log("Goes live:", publishAt);
-    }
-    console.log("Admin preview:", adminEditUrl);
-
-    const topicKey = topicEntry.topic_key ?? slugify(topicEntry.keywords[0]);
-    const logStatus = publishImmediately ? "success" : "scheduled";
-    const successLog = {
-      date,
-      topicKey,
-      title: blog.title,
-      keywords: publishKeywords,
-      category: topicEntry.category,
-      service: topicEntry.service ?? "",
-      source,
-      url: publishImmediately ? publicPath : adminEditUrl,
-      status: logStatus,
-    };
-
-    log.published.push({
-      date,
-      keyword: publishKeywords[0],
-      title: blog.title,
-      keywords: publishKeywords,
-      url: publishImmediately ? publicPath : adminEditUrl,
-      status: logStatus,
-      source,
-      publishAt,
-      unsplashId: cover.unsplashId || cover.imageId || null,
-      imageQuery: blog.imageQuery || null,
-      blogId: blogId || null,
-    });
-    writeJson("published_log.json", log);
-    await logPublishToApi(successLog);
-
-    appendLinkedInPost(buildLinkedInPost(blog, topicEntry.category));
-  } catch (err) {
-    console.error("Schedule save failed:", err.response?.data ?? err.message);
-    process.exit(1);
-  }
+  process.exit(1);
 }
 
 main();
