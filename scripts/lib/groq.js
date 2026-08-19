@@ -1,7 +1,7 @@
 /**
  * Groq API helpers — TPD/TPM-aware retries, sticky model fallback, capped waits.
  *
- * Free on_demand `llama-3.3-70b-versatile` has a low tokens-per-day (TPD) cap (~100k).
+ * Groq API helpers — TPD/TPM-aware retries, sticky model fallback, capped waits.
  * Once that model is exhausted, stick to GROQ_FALLBACK_MODEL for the rest of the run.
  */
 import axios from "axios";
