@@ -8,9 +8,9 @@ import axios from "axios";
 import { jsonrepair } from "jsonrepair";
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-export const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+export const GROQ_MODEL = process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
 export const GROQ_FALLBACK_MODEL =
-  process.env.GROQ_FALLBACK_MODEL ?? "llama-3.1-8b-instant";
+  process.env.GROQ_FALLBACK_MODEL ?? "openai/gpt-oss-20b";
 
 /** Hard cap so CI never stalls for 10–15 minutes on a single 429. */
 const MAX_429_WAIT_MS = Number(process.env.GROQ_MAX_429_WAIT_SEC ?? 60) * 1000;
