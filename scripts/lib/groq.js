@@ -288,7 +288,18 @@ export async function callGroq(prompt, temperature = 0.6, options = {}) {
           continue;
         }
 
-        const waitMs = resolve429WaitMs(err, attempt);
+        // Empty completions are common on primary for tiny JSON tasks — flip model fast.
+        if (emptyHit && model !== GROQ_FALLBACK_MODEL) {
+          switchToFallback(model, "empty response");
+          model = GROQ_FALLBACK_MODEL;
+          console.warn(`Groq empty response — retrying on \`${model}\` after 2s...`);
+          await sleep(2000);
+          continue;
+        }
+
+        const waitMs = emptyHit
+          ? Math.min(5000, 2000 * (attempt + 1))
+          : resolve429WaitMs(err, attempt);
         const kind = emptyHit ? "empty response" : tpmHit ? "TPM 429" : String(status);
         console.warn(
           `Groq ${kind} on \`${model}\` — waiting ${Math.round(waitMs / 1000)}s ` +

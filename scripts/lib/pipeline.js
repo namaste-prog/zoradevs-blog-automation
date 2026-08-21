@@ -15,8 +15,8 @@ const META_MAX_TOKENS = Number(process.env.GROQ_META_MAX_TOKENS ?? 2000);
 const FAQ_MAX_TOKENS = Number(process.env.GROQ_FAQ_MAX_TOKENS ?? 1800);
 const TARGET_FAQ_COUNT = 10;
 const MIN_FAQ_COUNT = 8;
-/** Pause between large Groq writes so TPM (~8k/min on gpt-oss free) can refill. */
-const PART_DELAY_MS = Number(process.env.GROQ_PART_DELAY_SEC ?? 35) * 1000;
+/** Short pause between large writes; TPM 429s are handled reactively in groq.js. */
+const PART_DELAY_MS = Number(process.env.GROQ_PART_DELAY_SEC ?? 12) * 1000;
 
 /** Exact closing paragraph required on every published blog (SEO roadmap). */
 export const ZORADEVS_CLOSING_PARAGRAPH =
@@ -448,8 +448,18 @@ function normalizeImageQuery(raw, fallbackPhrase = "") {
 }
 
 /**
+ * Local fallback so a finished blog never dies on a flaky imageQuery Groq call.
+ */
+function fallbackImageQuery({ title, topic, service }) {
+  return normalizeImageQuery(
+    `${topic || ""} ${service || ""} ${title || ""} professional technology workspace`,
+    title || topic || "software engineering team collaboration workspace"
+  );
+}
+
+/**
  * Generate imageQuery AFTER the final title + content exist.
- * Highly specific, domain-relevant stock-photo phrase (not generic office fluff).
+ * Fail-soft: if Groq returns empty/errors, use a title/topic phrase and continue.
  */
 export async function generateImageQueryFromBlog({ title, content, topic, service }) {
   const summary = String(content || "")
@@ -459,11 +469,12 @@ export async function generateImageQueryFromBlog({ title, content, topic, servic
     .trim()
     .slice(0, 900);
 
+  const localFallback = fallbackImageQuery({ title, topic, service });
   console.log("Generating dynamic imageQuery from final title + content summary...");
-  await sleep(partDelayMs());
 
-  const text = await callGroq(
-    `You create stock-photo search queries for Unsplash/Pexels.
+  try {
+    const text = await callGroq(
+      `You create stock-photo search queries for Unsplash/Pexels.
 
 Analyze this FINAL blog heading and content summary, then return ONE highly specific, descriptive, professional visual search phrase for a landscape cover image.
 
@@ -480,20 +491,27 @@ Rules:
 - AVOID low-quality abstract terms: concept, abstract background, futuristic matrix, innovation, digital transformation, neon, hologram, cyber
 - No brand names, no quotes, no punctuation
 - Return JSON only: { "imageQuery": "five to eight word phrase" }`,
-    0.35,
-    { maxTokens: 200, maxRetries: 3 }
-  );
+      0.35,
+      { maxTokens: 120, maxRetries: 2 }
+    );
 
-  let query = "";
-  try {
-    const parsed = parseJson(text);
-    query = normalizeImageQuery(parsed.imageQuery || parsed.query || "", title);
-  } catch {
-    query = normalizeImageQuery(extractContentFromResponse(text), title);
+    let query = "";
+    try {
+      const parsed = parseJson(text);
+      query = normalizeImageQuery(parsed.imageQuery || parsed.query || "", title);
+    } catch {
+      query = normalizeImageQuery(extractContentFromResponse(text), title);
+    }
+
+    if (!query) query = localFallback;
+    console.log(`Dynamic imageQuery: "${query}"`);
+    return query;
+  } catch (err) {
+    console.warn(
+      `imageQuery Groq failed (${err.message}) — using local fallback: "${localFallback}"`
+    );
+    return localFallback;
   }
-
-  console.log(`Dynamic imageQuery: "${query}"`);
-  return query;
 }
 
 const ZORADEVS_LINK_POOL = [
@@ -678,9 +696,9 @@ HARD REQUIREMENT: write at least 650 words for this part.`
 }
 
 function partDelayMs() {
-  // Fallback 8B models usually have higher TPM — shorter pause.
+  // Fallback models usually tolerate shorter pauses.
   if (isUsingFallbackModel()) {
-    return Number(process.env.GROQ_FALLBACK_PART_DELAY_SEC ?? 8) * 1000;
+    return Number(process.env.GROQ_FALLBACK_PART_DELAY_SEC ?? 5) * 1000;
   }
   return PART_DELAY_MS;
 }
@@ -910,8 +928,6 @@ export async function ensureQualityKeywords(brief, title, existingKeywords = [],
     `Keyword quality check failed (${keywords.length}/5 blog-specific) — regenerating...`
   );
 
-  await sleep(Math.min(partDelayMs(), 15000));
-
   const text = await callGroq(
     `Generate EXACTLY 5 SEO keyword phrases for THIS ONE blog post only.
 
@@ -954,9 +970,6 @@ async function ensureTenFaqs(brief, title, existingFaqs = []) {
   console.warn(
     `Only ${faqs.length} FAQs from metadata — generating dedicated FAQ set (target ${TARGET_FAQ_COUNT})...`
   );
-
-  // Metadata just burned TPM — wait before the dedicated FAQ call.
-  await sleep(partDelayMs());
 
   const text = await callGroq(
     `Generate EXACTLY ${TARGET_FAQ_COUNT} SEO FAQs for this ZoraDevs B2B blog.
@@ -1083,7 +1096,7 @@ export async function writeB2BBlogBody(brief, meta) {
 }
 
 export async function writeB2BBlog(brief, { maxTitleRetries = 3 } = {}) {
-  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 25);
+  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 8);
   console.log(`Waiting ${delaySec}s before Groq writer (TPM cooldown after topic pick)...`);
   await sleep(delaySec * 1000);
 
