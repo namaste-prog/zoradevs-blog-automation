@@ -1,6 +1,7 @@
 /**
  * Layer 2 & 4 — Service-based topic generation + B2B content engine.
- * Blog body is written in 3 parts so we hit 2000+ words under Groq's ~12k TPM cap.
+ * Blog body is written in 3 parts so we hit 2000+ words under Groq's ~8k TPM cap
+ * (openai/gpt-oss-* free tier). Keep per-call max_tokens modest so prompt+completion fits.
  */
 import { callGroq, parseJson, sleep, isUsingFallbackModel } from "./groq.js";
 
@@ -9,12 +10,13 @@ const MIN_WORDS = 2000;
 const MAX_WORDS = 2800;
 /** Absolute floor — publish rather than fail when fallback model writes shorter. */
 const ABSOLUTE_MIN_WORDS = Number(process.env.GROQ_ABSOLUTE_MIN_WORDS ?? 1400);
-const PART_MAX_TOKENS = Number(process.env.GROQ_PART_MAX_TOKENS ?? 3200);
-const META_MAX_TOKENS = Number(process.env.GROQ_META_MAX_TOKENS ?? 3500);
+const PART_MAX_TOKENS = Number(process.env.GROQ_PART_MAX_TOKENS ?? 2500);
+const META_MAX_TOKENS = Number(process.env.GROQ_META_MAX_TOKENS ?? 2000);
+const FAQ_MAX_TOKENS = Number(process.env.GROQ_FAQ_MAX_TOKENS ?? 1800);
 const TARGET_FAQ_COUNT = 10;
 const MIN_FAQ_COUNT = 8;
-/** Pause between large Groq writes so TPM (~12k/min) can refill. */
-const PART_DELAY_MS = Number(process.env.GROQ_PART_DELAY_SEC ?? 25) * 1000;
+/** Pause between large Groq writes so TPM (~8k/min on gpt-oss free) can refill. */
+const PART_DELAY_MS = Number(process.env.GROQ_PART_DELAY_SEC ?? 35) * 1000;
 
 /** Exact closing paragraph required on every published blog (SEO roadmap). */
 export const ZORADEVS_CLOSING_PARAGRAPH =
@@ -652,8 +654,8 @@ HARD REQUIREMENT: write at least 650 words for this part.`
         : buildPartPrompt(brief, title, part);
 
       const text = await callGroq(prompt, 0.55, {
-        maxTokens: Math.max(PART_MAX_TOKENS, isUsingFallbackModel() ? 4000 : PART_MAX_TOKENS),
-        maxRetries: 4,
+        maxTokens: PART_MAX_TOKENS,
+        maxRetries: 5,
       });
 
       const content = extractContentFromResponse(text);
@@ -715,8 +717,8 @@ EXISTING TAIL (context only — do not copy):
 ${content.slice(-1200)}`,
     0.55,
     {
-      maxTokens: Math.max(PART_MAX_TOKENS, 4000),
-      maxRetries: 4,
+      maxTokens: PART_MAX_TOKENS,
+      maxRetries: 5,
     }
   );
 
@@ -908,6 +910,8 @@ export async function ensureQualityKeywords(brief, title, existingKeywords = [],
     `Keyword quality check failed (${keywords.length}/5 blog-specific) — regenerating...`
   );
 
+  await sleep(Math.min(partDelayMs(), 15000));
+
   const text = await callGroq(
     `Generate EXACTLY 5 SEO keyword phrases for THIS ONE blog post only.
 
@@ -951,6 +955,9 @@ async function ensureTenFaqs(brief, title, existingFaqs = []) {
     `Only ${faqs.length} FAQs from metadata — generating dedicated FAQ set (target ${TARGET_FAQ_COUNT})...`
   );
 
+  // Metadata just burned TPM — wait before the dedicated FAQ call.
+  await sleep(partDelayMs());
+
   const text = await callGroq(
     `Generate EXACTLY ${TARGET_FAQ_COUNT} SEO FAQs for this ZoraDevs B2B blog.
 
@@ -966,7 +973,7 @@ Rules:
 - Return JSON only: { "faqs": [ { "question": "...", "answer": "..." } ] }
 - Escape newlines in strings as \\n`,
     0.4,
-    { maxTokens: 3500, maxRetries: 4 }
+    { maxTokens: FAQ_MAX_TOKENS, maxRetries: 5 }
   );
 
   const parsed = parseJson(text);
@@ -1076,7 +1083,7 @@ export async function writeB2BBlogBody(brief, meta) {
 }
 
 export async function writeB2BBlog(brief, { maxTitleRetries = 3 } = {}) {
-  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 15);
+  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 25);
   console.log(`Waiting ${delaySec}s before Groq writer (TPM cooldown after topic pick)...`);
   await sleep(delaySec * 1000);
 
