@@ -40,14 +40,17 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: openai/gpt-oss-120b
           GROQ_FALLBACK_MODEL: openai/gpt-oss-20b
-          GROQ_CALL_DELAY_SEC: "15"
-          GROQ_PART_DELAY_SEC: "25"
-          GROQ_FALLBACK_PART_DELAY_SEC: "8"
-          GROQ_MAX_429_WAIT_SEC: "60"
+          # Free-tier gpt-oss is ~8k TPM — space calls out and keep each request modest.
+          GROQ_CALL_DELAY_SEC: "25"
+          GROQ_PART_DELAY_SEC: "35"
+          GROQ_FALLBACK_PART_DELAY_SEC: "12"
+          GROQ_MAX_429_WAIT_SEC: "90"
+          GROQ_TPM_FALLBACK_AFTER: "2"
           GROQ_ABSOLUTE_MIN_WORDS: "1400"
-          GROQ_META_MAX_TOKENS: "3500"
-          GROQ_PART_MAX_TOKENS: "4000"
-          GROQ_MAX_TOKENS: "4500"
+          GROQ_META_MAX_TOKENS: "2000"
+          GROQ_FAQ_MAX_TOKENS: "1800"
+          GROQ_PART_MAX_TOKENS: "2500"
+          GROQ_MAX_TOKENS: "3000"
           PIPELINE_ATTEMPTS: "3"
           PUBLISH_ATTEMPTS: "3"
           BLOG_API_SECRET: ${{ secrets.BLOG_API_SECRET }}

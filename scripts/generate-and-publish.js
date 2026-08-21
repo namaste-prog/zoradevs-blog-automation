@@ -314,7 +314,7 @@ async function runB2BPipeline(config) {
  * Metadata pass with AI-in-title + banned-opener validation (up to 3 regenerations).
  */
 async function writeBlogWithTitleValidation(brief) {
-  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 15);
+  const delaySec = Number(process.env.GROQ_CALL_DELAY_SEC ?? 25);
   console.log(`Waiting ${delaySec}s before Groq writer (TPM cooldown after topic pick)...`);
   await sleep(delaySec * 1000);
 
@@ -762,7 +762,8 @@ async function main() {
       }
 
       if (pipelineAttempt < PIPELINE_ATTEMPTS) {
-        const waitSec = Math.min(60, 15 * pipelineAttempt);
+        // TPM refills per minute — give the bucket time before burning another full run.
+        const waitSec = Math.min(90, 30 * pipelineAttempt);
         console.warn(`Retrying full pipeline in ${waitSec}s with a fresh topic/slug...`);
         await sleep(waitSec * 1000);
       }

@@ -1,8 +1,6 @@
 /**
  * Groq API helpers — TPD/TPM-aware retries, sticky model fallback, capped waits.
- *
- * Groq API helpers — TPD/TPM-aware retries, sticky model fallback, capped waits.
- * Once that model is exhausted, stick to GROQ_FALLBACK_MODEL for the rest of the run.
+ * Once primary TPD (or repeated TPM) is exhausted, stick to GROQ_FALLBACK_MODEL.
  */
 import axios from "axios";
 import { jsonrepair } from "jsonrepair";
@@ -12,11 +10,16 @@ export const GROQ_MODEL = process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
 export const GROQ_FALLBACK_MODEL =
   process.env.GROQ_FALLBACK_MODEL ?? "openai/gpt-oss-20b";
 
-/** Hard cap so CI never stalls for 10–15 minutes on a single 429. */
-const MAX_429_WAIT_MS = Number(process.env.GROQ_MAX_429_WAIT_SEC ?? 60) * 1000;
+/** Hard cap so CI never stalls forever on a single 429. */
+const MAX_429_WAIT_MS = Number(process.env.GROQ_MAX_429_WAIT_SEC ?? 90) * 1000;
+/** Floor for max_tokens when shrinking after real "request too large". */
+const MIN_MAX_TOKENS = Number(process.env.GROQ_MIN_MAX_TOKENS ?? 1200);
+/** After this many TPM hits on primary, switch to fallback model (separate TPM bucket). */
+const TPM_FALLBACK_AFTER = Number(process.env.GROQ_TPM_FALLBACK_AFTER ?? 2);
 
-/** Once primary TPD is hit, never call it again in this process. */
+/** Once primary is abandoned, never call it again in this process. */
 let stickyModel = null;
+let tpmHitsOnPrimary = 0;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -72,13 +75,31 @@ export function isDailyTokenLimit(err) {
   );
 }
 
-function isTokenBudgetError(err) {
+/** True payload/context overflow — shrink max_tokens. NOT the same as TPM 429. */
+function isRequestTooLargeError(err) {
+  const status = err.response?.status;
   const msg = errorBodyMessage(err).toLowerCase();
   if (isDailyTokenLimit(err)) return false;
+  // TPM messages often contain "Requested N" — never treat those as size errors.
+  if (msg.includes("tokens per minute") || msg.includes("(tpm)") || /\btpm\b/.test(msg)) {
+    return false;
+  }
   return (
+    status === 413 ||
     msg.includes("request too large") ||
     msg.includes("please reduce your message size") ||
-    (msg.includes("tokens per minute") && msg.includes("requested"))
+    msg.includes("payload too large")
+  );
+}
+
+function isTpmRateLimit(err) {
+  if (err.response?.status !== 429 || isDailyTokenLimit(err)) return false;
+  const msg = errorBodyMessage(err).toLowerCase();
+  return (
+    msg.includes("tokens per minute") ||
+    msg.includes("(tpm)") ||
+    /\btpm\b/.test(msg) ||
+    msg.includes("rate limit reached")
   );
 }
 
@@ -101,13 +122,35 @@ function groqErrorMessage(err, model) {
   return msg;
 }
 
+/** Parse values like "7.66s", "2m59.56s", "1h2m3s". */
+function parseDurationToMs(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return 0;
+  if (/^\d+(\.\d+)?$/.test(s)) return parseFloat(s) * 1000;
+
+  let ms = 0;
+  const hours = s.match(/([\d.]+)\s*h/);
+  const mins = s.match(/([\d.]+)\s*m(?!s)/);
+  const secs = s.match(/([\d.]+)\s*s/);
+  if (hours) ms += parseFloat(hours[1]) * 3600 * 1000;
+  if (mins) ms += parseFloat(mins[1]) * 60 * 1000;
+  if (secs) ms += parseFloat(secs[1]) * 1000;
+  return ms;
+}
+
 function resolve429WaitMs(err, attempt) {
-  const header = err.response?.headers?.["retry-after"];
+  const headers = err.response?.headers || {};
   let suggestedMs = 0;
 
-  if (header) {
-    const sec = parseInt(String(header), 10);
+  const retryAfter = headers["retry-after"];
+  if (retryAfter) {
+    const sec = parseFloat(String(retryAfter));
     if (!Number.isNaN(sec) && sec > 0) suggestedMs = sec * 1000;
+  }
+
+  if (!suggestedMs) {
+    const resetTokens = headers["x-ratelimit-reset-tokens"];
+    if (resetTokens) suggestedMs = parseDurationToMs(resetTokens);
   }
 
   if (!suggestedMs) {
@@ -123,17 +166,23 @@ function resolve429WaitMs(err, attempt) {
     }
   }
 
-  const backoffMs = Math.min(45000, 6000 * (attempt + 1));
+  // TPM windows refill in seconds; always pad a little so the next request fits.
+  if (suggestedMs > 0 && suggestedMs < 60000) {
+    suggestedMs += 1500;
+  }
+
+  const backoffMs = Math.min(45000, 8000 * (attempt + 1));
   const raw = suggestedMs > 0 ? suggestedMs : backoffMs;
-  return Math.min(raw, MAX_429_WAIT_MS);
+  return Math.min(Math.max(raw, 2000), MAX_429_WAIT_MS);
 }
 
-function switchToFallback(fromModel) {
-  if (stickyModel === GROQ_FALLBACK_MODEL) return;
+function switchToFallback(fromModel, reason) {
+  if (stickyModel === GROQ_FALLBACK_MODEL) return false;
   stickyModel = GROQ_FALLBACK_MODEL;
   console.warn(
-    `Groq TPD exhausted on \`${fromModel}\` — sticky fallback for this run: \`${GROQ_FALLBACK_MODEL}\``
+    `Groq ${reason} on \`${fromModel}\` — sticky fallback for this run: \`${GROQ_FALLBACK_MODEL}\``
   );
+  return true;
 }
 
 async function postChat({ model, prompt, temperature, maxTokens }) {
@@ -164,24 +213,37 @@ async function postChat({ model, prompt, temperature, maxTokens }) {
 export async function callGroq(prompt, temperature = 0.6, options = {}) {
   if (!GROQ_API_KEY) throw new Error("Missing GROQ_API_KEY");
 
-  let maxTokens = Math.min(options.maxTokens ?? 3000, Number(process.env.GROQ_MAX_TOKENS ?? 4500));
-  const maxRetries = options.maxRetries ?? 3;
+  let maxTokens = Math.min(
+    options.maxTokens ?? 3000,
+    Number(process.env.GROQ_MAX_TOKENS ?? 3000)
+  );
+  const maxRetries = options.maxRetries ?? 5;
   let model = options.model || stickyModel || GROQ_MODEL;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const res = await postChat({ model, prompt, temperature, maxTokens });
-      return res.data.choices?.[0]?.message?.content ?? "";
+      const content = res.data.choices?.[0]?.message?.content ?? "";
+      if (!String(content).trim()) {
+        const emptyErr = new Error("Groq returned empty response");
+        emptyErr.emptyResponse = true;
+        emptyErr.response = { status: 503, data: { error: { message: emptyErr.message } } };
+        throw emptyErr;
+      }
+      return content;
     } catch (err) {
       const status = err.response?.status;
       const dailyHit = status === 429 && isDailyTokenLimit(err);
-      const tokenBudgetHit = isTokenBudgetError(err);
-      const isRetryable = status === 429 || status === 503 || tokenBudgetHit;
+      const sizeHit = isRequestTooLargeError(err);
+      const tpmHit = isTpmRateLimit(err) || (status === 429 && !dailyHit && !sizeHit);
+      const emptyHit = Boolean(err.emptyResponse);
+      const isRetryable =
+        status === 429 || status === 503 || status === 413 || sizeHit || emptyHit;
 
       if (dailyHit && model !== GROQ_FALLBACK_MODEL) {
-        switchToFallback(model);
+        switchToFallback(model, "TPD exhausted");
         model = GROQ_FALLBACK_MODEL;
-        maxTokens = Math.min(Math.max(maxTokens, 3500), 4500);
+        maxTokens = Math.min(Math.max(maxTokens, 2500), Number(process.env.GROQ_MAX_TOKENS ?? 3000));
         await sleep(1000);
         continue;
       }
@@ -193,9 +255,31 @@ export async function callGroq(prompt, temperature = 0.6, options = {}) {
         throw error;
       }
 
+      if (tpmHit && model !== GROQ_FALLBACK_MODEL) {
+        tpmHitsOnPrimary += 1;
+        if (tpmHitsOnPrimary >= TPM_FALLBACK_AFTER) {
+          switchToFallback(model, `TPM pressure (${tpmHitsOnPrimary} hits)`);
+          model = GROQ_FALLBACK_MODEL;
+          // Brief pause so we do not immediately slam the fallback bucket.
+          await sleep(3000);
+          continue;
+        }
+      }
+
       if (isRetryable && attempt < maxRetries) {
-        if (tokenBudgetHit) {
-          const next = Math.max(1800, Math.floor(maxTokens * 0.7));
+        if (sizeHit) {
+          const next = Math.max(MIN_MAX_TOKENS, Math.floor(maxTokens * 0.7));
+          if (next >= maxTokens) {
+            console.warn(
+              `Groq request still too large at max_tokens=${maxTokens} — waiting then retrying...`
+            );
+            await sleep(resolve429WaitMs(err, attempt));
+            if (model !== GROQ_FALLBACK_MODEL) {
+              switchToFallback(model, "request too large");
+              model = GROQ_FALLBACK_MODEL;
+            }
+            continue;
+          }
           console.warn(
             `Groq request too large (max_tokens=${maxTokens}) — retrying with ${next}...`
           );
@@ -205,12 +289,16 @@ export async function callGroq(prompt, temperature = 0.6, options = {}) {
         }
 
         const waitMs = resolve429WaitMs(err, attempt);
+        const kind = emptyHit ? "empty response" : tpmHit ? "TPM 429" : String(status);
         console.warn(
-          `Groq ${status} on \`${model}\` — waiting ${Math.round(waitMs / 1000)}s ` +
+          `Groq ${kind} on \`${model}\` — waiting ${Math.round(waitMs / 1000)}s ` +
             `(retry ${attempt + 1}/${maxRetries})...`
         );
         await sleep(waitMs);
-        maxTokens = Math.max(1800, Math.floor(maxTokens * 0.85));
+        // Slightly smaller completion budget helps the next call fit remaining TPM.
+        if (tpmHit) {
+          maxTokens = Math.max(MIN_MAX_TOKENS, Math.floor(maxTokens * 0.9));
+        }
         continue;
       }
 
