@@ -1337,6 +1337,26 @@
       "imageQuery": "generative ai drafts technical specs for custom software",
       "blogId": "6aab8934190e3ca899086960",
       "slug": "generative-ai-technical-specs-custom-software"
+    },
+    {
+      "date": "2026-09-18",
+      "keyword": "AI mobile session management",
+      "title": "How AI Boosts Session Persistence in High‑Traffic Mobile Banking Apps",
+      "keywords": [
+        "AI mobile session management",
+        "banking app performance optimization",
+        "AI-driven user retention mobile",
+        "scalable mobile backend AI",
+        "real-time fraud detection mobile"
+      ],
+      "url": "https://zoradevs.com/blog/how-ai-boosts-session-persistence-mobile-banking",
+      "status": "success",
+      "source": "b2b-pipeline",
+      "publishAt": "2026-09-18T06:25:58.721Z",
+      "unsplashId": "unsplash:0K2G2apr9M0",
+      "imageQuery": "how ai improves session persistence for high traffic",
+      "blogId": "6aacd97a14d039d1a0f371de",
+      "slug": "how-ai-boosts-session-persistence-mobile-banking"
     }
   ]
 }
